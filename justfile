@@ -39,3 +39,8 @@ checkc:
 [group('rust')]
 runc:
     cargo run
+
+# Sync to remove stats.fish.foo
+[group('admin')]
+sync:
+    rsync ./report.html seedbox-root:/var/www/stats/index.html
