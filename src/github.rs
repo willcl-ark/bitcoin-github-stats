@@ -32,7 +32,7 @@ pub async fn check_rate_limit(client: &Octocrab) -> Result<(), Box<dyn std::erro
         let wait = (reset as i64) - now + 5;
         if wait > 0 {
             eprintln!(
-                "rate limit low ({remaining} remaining), sleeping {wait}s until reset..."
+                "level=info source=github op=rate_limit remaining={remaining} action=sleep seconds={wait}"
             );
             tokio::time::sleep(std::time::Duration::from_secs(wait as u64)).await;
         }
@@ -56,7 +56,7 @@ pub async fn get_with_retry<T: DeserializeOwned>(
                     return Err(Box::new(err));
                 }
                 eprintln!(
-                    "request failed on attempt {attempt}/{RETRY_MAX_ATTEMPTS}; retrying in {delay_ms}ms: {path}"
+                    "level=warn source=github op=request_retry attempt={attempt} max_attempts={RETRY_MAX_ATTEMPTS} delay_ms={delay_ms} path={path}"
                 );
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 attempt += 1;

@@ -17,7 +17,7 @@ pub async fn fetch_day(
     let day_end = format!("{date_str}T23:59:59Z");
     if let Some(cursor) = db::get_sync_cursor(conn, FETCH_CURSOR_KEY)? {
         if cursor.as_str() >= day_end.as_str() {
-            eprintln!("issues: {date_str} already covered by cursor {cursor}, skipping");
+            eprintln!("level=info source=issues date={date_str} status=skip reason=cursor cursor={cursor}");
             return Ok(());
         }
     }
@@ -55,7 +55,7 @@ pub async fn fetch_day(
         }
         tx.commit()?;
 
-        eprintln!("issues: {date_str} page {page} — {count} total so far");
+        eprintln!("level=info source=issues date={date_str} page={page} total={count}");
 
         if past_day || issues.len() < 100 {
             break;
@@ -65,7 +65,7 @@ pub async fn fetch_day(
 
     db::log_sync(conn, "issues", &date_str, count)?;
     db::set_sync_cursor(conn, FETCH_CURSOR_KEY, &day_end)?;
-    eprintln!("issues: {date_str} done — {count} records");
+    eprintln!("level=info source=issues date={date_str} status=done records={count}");
     Ok(())
 }
 
@@ -74,28 +74,33 @@ pub async fn backfill(
     conn: &Connection,
     from: NaiveDate,
     to: NaiveDate,
+    resume: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(cursor) = db::get_sync_cursor(conn, BACKFILL_CURSOR_KEY)? {
-        if let Some(cursor_date) = parse_cursor_date(&cursor) {
-            let next = cursor_date + chrono::Duration::days(1);
-            if next > from {
-                eprintln!("issues: resuming backfill from {next}");
+    if resume {
+        if let Some(cursor) = db::get_sync_cursor(conn, BACKFILL_CURSOR_KEY)? {
+            if let Some(cursor_date) = parse_cursor_date(&cursor) {
+                let next = cursor_date + chrono::Duration::days(1);
+                if next > from {
+                    eprintln!("level=info source=issues op=backfill resume_from={next}");
+                }
             }
         }
     }
 
     // Chunk by month using `since` parameter
     let mut chunk_start = from;
-    if let Some(cursor) = db::get_sync_cursor(conn, BACKFILL_CURSOR_KEY)? {
-        if let Some(cursor_date) = parse_cursor_date(&cursor) {
-            let next = cursor_date + chrono::Duration::days(1);
-            if next > chunk_start {
-                chunk_start = next;
+    if resume {
+        if let Some(cursor) = db::get_sync_cursor(conn, BACKFILL_CURSOR_KEY)? {
+            if let Some(cursor_date) = parse_cursor_date(&cursor) {
+                let next = cursor_date + chrono::Duration::days(1);
+                if next > chunk_start {
+                    chunk_start = next;
+                }
             }
         }
     }
     if chunk_start > to {
-        eprintln!("issues: backfill cursor already covers requested range");
+        eprintln!("level=info source=issues op=backfill status=already_covered");
         return Ok(());
     }
 
@@ -145,7 +150,7 @@ pub async fn backfill(
             }
             tx.commit()?;
 
-            eprintln!("issues: {range_key} page {page} — {count} total so far");
+            eprintln!("level=info source=issues op=backfill range={range_key} page={page} total={count}");
 
             if past_range || issues.len() < 100 {
                 break;
@@ -155,7 +160,7 @@ pub async fn backfill(
 
         db::log_sync(conn, "issues", &range_key, count)?;
         db::set_sync_cursor(conn, BACKFILL_CURSOR_KEY, &until_str)?;
-        eprintln!("issues: {range_key} done — {count} records");
+        eprintln!("level=info source=issues op=backfill range={range_key} status=done records={count}");
 
         chunk_start = chunk_end + chrono::Duration::days(1);
     }

@@ -17,7 +17,9 @@ pub async fn fetch_day(
     let day_end = format!("{date_str}T23:59:59Z");
     if let Some(cursor) = db::get_sync_cursor(conn, FETCH_CURSOR_KEY)? {
         if cursor.as_str() >= day_end.as_str() {
-            eprintln!("pull_requests: {date_str} already covered by cursor {cursor}, skipping");
+            eprintln!(
+                "level=info source=pull_requests date={date_str} status=skip reason=cursor cursor={cursor}"
+            );
             return Ok(());
         }
     }
@@ -56,7 +58,7 @@ pub async fn fetch_day(
         }
         tx.commit()?;
 
-        eprintln!("pull_requests: {date_str} page {page} — {count} total so far");
+        eprintln!("level=info source=pull_requests date={date_str} page={page} total={count}");
 
         if all_before_date || prs.len() < 100 {
             break;
@@ -66,7 +68,7 @@ pub async fn fetch_day(
 
     db::log_sync(conn, "pull_requests", &date_str, count)?;
     db::set_sync_cursor(conn, FETCH_CURSOR_KEY, &day_end)?;
-    eprintln!("pull_requests: {date_str} done — {count} records");
+    eprintln!("level=info source=pull_requests date={date_str} status=done records={count}");
     Ok(())
 }
 
@@ -75,18 +77,21 @@ pub async fn backfill(
     conn: &Connection,
     from: NaiveDate,
     to: NaiveDate,
+    resume: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut effective_from = from;
-    if let Some(cursor) = db::get_sync_cursor(conn, BACKFILL_CURSOR_KEY)? {
-        if let Some(cursor_date) = parse_cursor_date(&cursor) {
-            let next = cursor_date + chrono::Duration::days(1);
-            if next > effective_from {
-                effective_from = next;
+    if resume {
+        if let Some(cursor) = db::get_sync_cursor(conn, BACKFILL_CURSOR_KEY)? {
+            if let Some(cursor_date) = parse_cursor_date(&cursor) {
+                let next = cursor_date + chrono::Duration::days(1);
+                if next > effective_from {
+                    effective_from = next;
+                }
             }
         }
     }
     if effective_from > to {
-        eprintln!("pull_requests: backfill cursor already covers requested range");
+        eprintln!("level=info source=pull_requests op=backfill status=already_covered");
         return Ok(());
     }
     fetch_range(client, conn, effective_from, to).await?;
@@ -137,7 +142,7 @@ async fn fetch_range(
         }
         tx.commit()?;
 
-        eprintln!("pull_requests: backfill page {page} — {count} total so far");
+        eprintln!("level=info source=pull_requests op=backfill page={page} total={count}");
 
         if before_range || prs.len() < 100 {
             break;
@@ -146,7 +151,7 @@ async fn fetch_range(
     }
 
     db::log_sync(conn, "pull_requests", &range_key, count)?;
-    eprintln!("pull_requests: backfill {range_key} done — {count} records");
+    eprintln!("level=info source=pull_requests op=backfill range={range_key} status=done records={count}");
     Ok(())
 }
 

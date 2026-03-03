@@ -32,6 +32,9 @@ enum Command {
         /// End date (defaults to today)
         #[arg(long)]
         to: Option<String>,
+        /// Resume from source-specific backfill cursors
+        #[arg(long, default_value_t = false)]
+        resume: bool,
     },
 }
 
@@ -51,16 +54,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(d) => parse_date(&d)?,
                 None => chrono::Utc::now().date_naive(),
             };
-            eprintln!("fetching data for {date}");
+            eprintln!("level=info op=fetch_day date={date}");
 
             fetch::runs::fetch_day(&client, &conn, date).await?;
             fetch::pulls::fetch_day(&client, &conn, date).await?;
             fetch::issues::fetch_day(&client, &conn, date).await?;
             fetch::commits::fetch_day(&client, &conn, date).await?;
 
-            eprintln!("done");
+            eprintln!("level=info op=fetch_day status=complete date={date}");
         }
-        Command::Backfill { from, to } => {
+        Command::Backfill { from, to, resume } => {
             let from = match from {
                 Some(d) => parse_date(&d)?,
                 None => parse_date("2025-03-01")?,
@@ -69,14 +72,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(d) => parse_date(&d)?,
                 None => chrono::Utc::now().date_naive(),
             };
-            eprintln!("backfilling {from} to {to}");
+            eprintln!("level=info op=backfill from={from} to={to} resume={resume}");
 
-            fetch::runs::backfill(&client, &conn, from, to).await?;
-            fetch::pulls::backfill(&client, &conn, from, to).await?;
-            fetch::issues::backfill(&client, &conn, from, to).await?;
-            fetch::commits::backfill(&client, &conn, from, to).await?;
+            fetch::runs::backfill(&client, &conn, from, to, resume).await?;
+            fetch::pulls::backfill(&client, &conn, from, to, resume).await?;
+            fetch::issues::backfill(&client, &conn, from, to, resume).await?;
+            fetch::commits::backfill(&client, &conn, from, to, resume).await?;
 
-            eprintln!("backfill complete");
+            eprintln!("level=info op=backfill status=complete");
         }
     }
 

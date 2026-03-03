@@ -5,6 +5,8 @@ use rusqlite::Connection;
 use crate::db;
 use crate::github;
 
+const BACKFILL_CURSOR_KEY: &str = "workflow_runs:backfill:last_created_date";
+
 pub async fn fetch_day(
     client: &Octocrab,
     conn: &Connection,
@@ -39,7 +41,7 @@ pub async fn fetch_day(
         }
         tx.commit()?;
 
-        eprintln!("workflow_runs: {date_str} page {page} — {count} total so far");
+        eprintln!("level=info source=workflow_runs date={date_str} page={page} total={count}");
 
         if runs.len() < 100 {
             break;
@@ -48,7 +50,7 @@ pub async fn fetch_day(
     }
 
     db::log_sync(conn, "workflow_runs", &date_str, count)?;
-    eprintln!("workflow_runs: {date_str} done — {count} records");
+    eprintln!("level=info source=workflow_runs date={date_str} status=done records={count}");
     Ok(())
 }
 
@@ -57,10 +59,31 @@ pub async fn backfill(
     conn: &Connection,
     from: NaiveDate,
     to: NaiveDate,
+    resume: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut date = from;
+    if resume {
+        if let Some(cursor) = db::get_sync_cursor(conn, BACKFILL_CURSOR_KEY)? {
+            if let Ok(cursor_date) = NaiveDate::parse_from_str(&cursor, "%Y-%m-%d") {
+                let next = cursor_date + chrono::Duration::days(1);
+                if next > date {
+                    date = next;
+                }
+            }
+        }
+    }
+    if date > to {
+        eprintln!("level=info source=workflow_runs op=backfill status=already_covered");
+        return Ok(());
+    }
+
     while date <= to {
         fetch_day(client, conn, date).await?;
+        db::set_sync_cursor(
+            conn,
+            BACKFILL_CURSOR_KEY,
+            &date.format("%Y-%m-%d").to_string(),
+        )?;
         date += chrono::Duration::days(1);
     }
     Ok(())
