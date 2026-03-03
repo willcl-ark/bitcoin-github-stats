@@ -38,7 +38,7 @@ pub async fn fetch_day(
         let mut all_before_date = true;
         for pr in &prs {
             let updated = pr["updated_at"].as_str().unwrap_or("");
-            if updated < &date_str {
+            if updated < date_str.as_str() {
                 // This PR was last updated before our target date — stop
                 all_before_date = true;
                 break;
@@ -99,7 +99,7 @@ async fn fetch_range(
         let prs: Vec<serde_json::Value> = client
             .get(
                 format!(
-                    "/repos/bitcoin/bitcoin/pulls?state=all&sort=updated&direction=asc&per_page=100&page={page}"
+                    "/repos/bitcoin/bitcoin/pulls?state=all&sort=updated&direction=desc&per_page=100&page={page}"
                 ),
                 None::<&()>,
             )
@@ -109,14 +109,14 @@ async fn fetch_range(
             break;
         }
 
-        let mut past_range = false;
+        let mut before_range = false;
         for pr in &prs {
             let updated = pr["updated_at"].as_str().unwrap_or("");
-            if updated > &format!("{to_str}T23:59:59Z") {
-                past_range = true;
+            if updated < format!("{from_str}T00:00:00Z").as_str() {
+                before_range = true;
                 break;
             }
-            if updated >= &format!("{from_str}T00:00:00Z") {
+            if updated <= format!("{to_str}T23:59:59Z").as_str() {
                 db::upsert_pull_request(conn, pr)?;
                 count += 1;
             }
@@ -124,7 +124,7 @@ async fn fetch_range(
 
         eprintln!("pull_requests: backfill page {page} — {count} total so far");
 
-        if past_range || prs.len() < 100 {
+        if before_range || prs.len() < 100 {
             break;
         }
         page += 1;

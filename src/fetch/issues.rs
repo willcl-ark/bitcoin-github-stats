@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use octocrab::Octocrab;
 use rusqlite::Connection;
 
@@ -43,7 +43,7 @@ pub async fn fetch_day(
         let mut past_day = false;
         for issue in &issues {
             let updated = issue["updated_at"].as_str().unwrap_or("");
-            if updated >= &format!("{next_day}T00:00:00Z") {
+            if updated >= format!("{next_day}T00:00:00Z").as_str() {
                 past_day = true;
                 break;
             }
@@ -118,7 +118,7 @@ pub async fn backfill(
             let mut past_range = false;
             for issue in &issues {
                 let updated = issue["updated_at"].as_str().unwrap_or("");
-                if updated > &until_str {
+                if updated > until_str.as_str() {
                     past_range = true;
                     break;
                 }

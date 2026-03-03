@@ -217,16 +217,6 @@ pub fn log_sync(conn: &Connection, table: &str, date: &str, count: usize) -> Res
     Ok(())
 }
 
-pub fn last_synced_date(conn: &Connection, table: &str) -> Result<Option<String>> {
-    let mut stmt =
-        conn.prepare("SELECT date FROM sync_log WHERE table_name=?1 ORDER BY date DESC LIMIT 1")?;
-    let mut rows = stmt.query(params![table])?;
-    match rows.next()? {
-        Some(row) => Ok(Some(row.get(0)?)),
-        None => Ok(None),
-    }
-}
-
 pub fn is_date_synced(conn: &Connection, table: &str, date: &str) -> Result<bool> {
     let mut stmt =
         conn.prepare("SELECT COUNT(*) FROM sync_log WHERE table_name=?1 AND date=?2")?;

@@ -1,7 +1,7 @@
 use octocrab::Octocrab;
 use std::process::Command;
 
-const RATE_LIMIT_FLOOR: u32 = 500;
+const RATE_LIMIT_FLOOR: usize = 500;
 
 pub fn build_client() -> Result<Octocrab, Box<dyn std::error::Error>> {
     let token = std::env::var("GITHUB_TOKEN").or_else(|_| {
@@ -10,7 +10,7 @@ pub fn build_client() -> Result<Octocrab, Box<dyn std::error::Error>> {
             .output()
             .map_err(|e| format!("failed to run `gh auth token`: {e}"))?;
         if !out.status.success() {
-            return Err("gh auth token failed — set GITHUB_TOKEN".into());
+            return Err::<_, Box<dyn std::error::Error>>("gh auth token failed — set GITHUB_TOKEN".into());
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     })?;

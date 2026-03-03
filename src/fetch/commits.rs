@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use octocrab::Octocrab;
 use rusqlite::Connection;
 
