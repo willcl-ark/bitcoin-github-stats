@@ -84,6 +84,13 @@ fn init_schema(conn: &Connection) -> Result<()> {
             cursor          TEXT NOT NULL,
             updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
         );
+
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_created_at ON workflow_runs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_updated_at ON workflow_runs(updated_at);
+        CREATE INDEX IF NOT EXISTS idx_pull_requests_updated_at ON pull_requests(updated_at);
+        CREATE INDEX IF NOT EXISTS idx_issues_updated_at ON issues(updated_at);
+        CREATE INDEX IF NOT EXISTS idx_commits_date ON commits(date);
+        CREATE INDEX IF NOT EXISTS idx_sync_log_table_date ON sync_log(table_name, date);
         ",
     )
 }
