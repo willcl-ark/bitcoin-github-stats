@@ -32,10 +32,12 @@ pub async fn fetch_day(
             break;
         }
 
+        let tx = conn.unchecked_transaction()?;
         for run in runs {
-            db::upsert_workflow_run(conn, run)?;
+            db::upsert_workflow_run(&tx, run)?;
             count += 1;
         }
+        tx.commit()?;
 
         eprintln!("workflow_runs: {date_str} page {page} — {count} total so far");
 

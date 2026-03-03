@@ -40,10 +40,12 @@ pub async fn fetch_day(
             break;
         }
 
+        let tx = conn.unchecked_transaction()?;
         for c in &commits {
-            db::upsert_commit(conn, c)?;
+            db::upsert_commit(&tx, c)?;
             count += 1;
         }
+        tx.commit()?;
 
         eprintln!("commits: {date_str} page {page} — {count} total so far");
 
@@ -113,10 +115,12 @@ pub async fn backfill(
                 break;
             }
 
+            let tx = conn.unchecked_transaction()?;
             for c in &commits {
-                db::upsert_commit(conn, c)?;
+                db::upsert_commit(&tx, c)?;
                 count += 1;
             }
+            tx.commit()?;
 
             eprintln!("commits: {range_key} page {page} — {count} total so far");
 

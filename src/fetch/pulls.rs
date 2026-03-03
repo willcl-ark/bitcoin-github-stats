@@ -37,6 +37,7 @@ pub async fn fetch_day(
             break;
         }
 
+        let tx = conn.unchecked_transaction()?;
         let mut all_before_date = true;
         for pr in &prs {
             let updated = pr["updated_at"].as_str().unwrap_or("");
@@ -46,13 +47,14 @@ pub async fn fetch_day(
                 break;
             }
             if updated.starts_with(&date_str) {
-                db::upsert_pull_request(conn, pr)?;
+                db::upsert_pull_request(&tx, pr)?;
                 count += 1;
                 all_before_date = false;
             } else {
                 all_before_date = false;
             }
         }
+        tx.commit()?;
 
         eprintln!("pull_requests: {date_str} page {page} — {count} total so far");
 
@@ -120,6 +122,7 @@ async fn fetch_range(
             break;
         }
 
+        let tx = conn.unchecked_transaction()?;
         let mut before_range = false;
         for pr in &prs {
             let updated = pr["updated_at"].as_str().unwrap_or("");
@@ -128,10 +131,11 @@ async fn fetch_range(
                 break;
             }
             if updated <= format!("{to_str}T23:59:59Z").as_str() {
-                db::upsert_pull_request(conn, pr)?;
+                db::upsert_pull_request(&tx, pr)?;
                 count += 1;
             }
         }
+        tx.commit()?;
 
         eprintln!("pull_requests: backfill page {page} — {count} total so far");
 

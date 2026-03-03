@@ -42,6 +42,7 @@ pub async fn fetch_day(
             break;
         }
 
+        let tx = conn.unchecked_transaction()?;
         let mut past_day = false;
         for issue in &issues {
             let updated = issue["updated_at"].as_str().unwrap_or("");
@@ -49,9 +50,10 @@ pub async fn fetch_day(
                 past_day = true;
                 break;
             }
-            db::upsert_issue(conn, issue)?;
+            db::upsert_issue(&tx, issue)?;
             count += 1;
         }
+        tx.commit()?;
 
         eprintln!("issues: {date_str} page {page} — {count} total so far");
 
@@ -130,6 +132,7 @@ pub async fn backfill(
                 break;
             }
 
+            let tx = conn.unchecked_transaction()?;
             let mut past_range = false;
             for issue in &issues {
                 let updated = issue["updated_at"].as_str().unwrap_or("");
@@ -137,9 +140,10 @@ pub async fn backfill(
                     past_range = true;
                     break;
                 }
-                db::upsert_issue(conn, issue)?;
+                db::upsert_issue(&tx, issue)?;
                 count += 1;
             }
+            tx.commit()?;
 
             eprintln!("issues: {range_key} page {page} — {count} total so far");
 
