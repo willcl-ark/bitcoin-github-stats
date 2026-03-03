@@ -78,6 +78,12 @@ fn init_schema(conn: &Connection) -> Result<()> {
             fetched_at      TEXT NOT NULL,
             record_count    INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS sync_state (
+            source          TEXT PRIMARY KEY,
+            cursor          TEXT NOT NULL,
+            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
         ",
     )
 }
@@ -217,10 +223,26 @@ pub fn log_sync(conn: &Connection, table: &str, date: &str, count: usize) -> Res
     Ok(())
 }
 
-pub fn is_date_synced(conn: &Connection, table: &str, date: &str) -> Result<bool> {
-    let mut stmt = conn.prepare("SELECT COUNT(*) FROM sync_log WHERE table_name=?1 AND date=?2")?;
-    let count: i64 = stmt.query_row(params![table, date], |row| row.get(0))?;
-    Ok(count > 0)
+pub fn get_sync_cursor(conn: &Connection, source: &str) -> Result<Option<String>> {
+    let mut stmt = conn.prepare("SELECT cursor FROM sync_state WHERE source=?1")?;
+    let mut rows = stmt.query(params![source])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row.get(0)?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn set_sync_cursor(conn: &Connection, source: &str, cursor: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO sync_state (source, cursor, updated_at)
+         VALUES (?1, ?2, datetime('now'))
+         ON CONFLICT(source) DO UPDATE SET
+            cursor=excluded.cursor,
+            updated_at=excluded.updated_at",
+        params![source, cursor],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -285,12 +307,15 @@ mod tests {
     }
 
     #[test]
-    fn log_sync_marks_date_as_synced() {
+    fn sync_state_round_trip() {
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
 
-        assert!(!is_date_synced(&conn, "issues", "2026-03-01").unwrap());
-        log_sync(&conn, "issues", "2026-03-01", 123).unwrap();
-        assert!(is_date_synced(&conn, "issues", "2026-03-01").unwrap());
+        assert_eq!(get_sync_cursor(&conn, "issues:fetch_day").unwrap(), None);
+        set_sync_cursor(&conn, "issues:fetch_day", "2026-03-01T23:59:59Z").unwrap();
+        assert_eq!(
+            get_sync_cursor(&conn, "issues:fetch_day").unwrap().as_deref(),
+            Some("2026-03-01T23:59:59Z")
+        );
     }
 }

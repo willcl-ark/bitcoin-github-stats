@@ -5,15 +5,21 @@ use rusqlite::Connection;
 use crate::db;
 use crate::github;
 
+const FETCH_CURSOR_KEY: &str = "pull_requests:fetch_day:last_updated_at";
+const BACKFILL_CURSOR_KEY: &str = "pull_requests:backfill:last_updated_at";
+
 pub async fn fetch_day(
     client: &Octocrab,
     conn: &Connection,
     date: NaiveDate,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let date_str = date.format("%Y-%m-%d").to_string();
-    if db::is_date_synced(conn, "pull_requests", &date_str)? {
-        eprintln!("pull_requests: {date_str} already synced, skipping");
-        return Ok(());
+    let day_end = format!("{date_str}T23:59:59Z");
+    if let Some(cursor) = db::get_sync_cursor(conn, FETCH_CURSOR_KEY)? {
+        if cursor.as_str() >= day_end.as_str() {
+            eprintln!("pull_requests: {date_str} already covered by cursor {cursor}, skipping");
+            return Ok(());
+        }
     }
 
     let mut count = 0usize;
@@ -57,6 +63,7 @@ pub async fn fetch_day(
     }
 
     db::log_sync(conn, "pull_requests", &date_str, count)?;
+    db::set_sync_cursor(conn, FETCH_CURSOR_KEY, &day_end)?;
     eprintln!("pull_requests: {date_str} done — {count} records");
     Ok(())
 }
@@ -67,7 +74,23 @@ pub async fn backfill(
     from: NaiveDate,
     to: NaiveDate,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    fetch_range(client, conn, from, to).await
+    let mut effective_from = from;
+    if let Some(cursor) = db::get_sync_cursor(conn, BACKFILL_CURSOR_KEY)? {
+        if let Some(cursor_date) = parse_cursor_date(&cursor) {
+            let next = cursor_date + chrono::Duration::days(1);
+            if next > effective_from {
+                effective_from = next;
+            }
+        }
+    }
+    if effective_from > to {
+        eprintln!("pull_requests: backfill cursor already covers requested range");
+        return Ok(());
+    }
+    fetch_range(client, conn, effective_from, to).await?;
+    let final_cursor = format!("{}T23:59:59Z", to.format("%Y-%m-%d"));
+    db::set_sync_cursor(conn, BACKFILL_CURSOR_KEY, &final_cursor)?;
+    Ok(())
 }
 
 async fn fetch_range(
@@ -81,10 +104,6 @@ async fn fetch_range(
 
     // For backfill, paginate by updated_at descending and collect PRs in range
     let range_key = format!("{from_str}..{to_str}");
-    if db::is_date_synced(conn, "pull_requests", &range_key)? {
-        eprintln!("pull_requests: {range_key} already synced, skipping");
-        return Ok(());
-    }
 
     let mut count = 0usize;
     let mut page = 1u32;
@@ -125,4 +144,11 @@ async fn fetch_range(
     db::log_sync(conn, "pull_requests", &range_key, count)?;
     eprintln!("pull_requests: backfill {range_key} done — {count} records");
     Ok(())
+}
+
+fn parse_cursor_date(cursor: &str) -> Option<NaiveDate> {
+    if cursor.len() < 10 {
+        return None;
+    }
+    NaiveDate::parse_from_str(&cursor[0..10], "%Y-%m-%d").ok()
 }
