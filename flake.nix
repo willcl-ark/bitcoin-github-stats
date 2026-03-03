@@ -62,7 +62,6 @@
           inherit checks;
           formatter = treefmtEval.config.build.wrapper;
           devShells.default = craneLib.devShell {
-            inherit checks;
             packages = [ pkgs.just ];
           };
         };
