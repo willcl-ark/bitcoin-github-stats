@@ -218,8 +218,79 @@ pub fn log_sync(conn: &Connection, table: &str, date: &str, count: usize) -> Res
 }
 
 pub fn is_date_synced(conn: &Connection, table: &str, date: &str) -> Result<bool> {
-    let mut stmt =
-        conn.prepare("SELECT COUNT(*) FROM sync_log WHERE table_name=?1 AND date=?2")?;
+    let mut stmt = conn.prepare("SELECT COUNT(*) FROM sync_log WHERE table_name=?1 AND date=?2")?;
     let count: i64 = stmt.query_row(params![table, date], |row| row.get(0))?;
     Ok(count > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn upsert_workflow_run_updates_mutable_fields() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let first = json!({
+            "id": 1,
+            "name": "ci",
+            "event": "push",
+            "conclusion": null,
+            "status": "in_progress",
+            "actor": { "login": "alice" },
+            "triggering_actor": { "login": "alice" },
+            "head_branch": "master",
+            "head_sha": "abc",
+            "display_title": "test run",
+            "run_number": 1,
+            "run_attempt": 1,
+            "created_at": "2026-03-01T00:00:00Z",
+            "updated_at": "2026-03-01T00:01:00Z",
+            "run_started_at": "2026-03-01T00:00:10Z"
+        });
+        upsert_workflow_run(&conn, &first).unwrap();
+
+        let updated = json!({
+            "id": 1,
+            "name": "ci",
+            "event": "push",
+            "conclusion": "success",
+            "status": "completed",
+            "actor": { "login": "alice" },
+            "triggering_actor": { "login": "alice" },
+            "head_branch": "master",
+            "head_sha": "abc",
+            "display_title": "test run",
+            "run_number": 1,
+            "run_attempt": 1,
+            "created_at": "2026-03-01T00:00:00Z",
+            "updated_at": "2026-03-01T00:02:00Z",
+            "run_started_at": "2026-03-01T00:00:10Z"
+        });
+        upsert_workflow_run(&conn, &updated).unwrap();
+
+        let row: (String, Option<String>, String) = conn
+            .query_row(
+                "SELECT status, conclusion, updated_at FROM workflow_runs WHERE id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(row.0, "completed");
+        assert_eq!(row.1.as_deref(), Some("success"));
+        assert_eq!(row.2, "2026-03-01T00:02:00Z");
+    }
+
+    #[test]
+    fn log_sync_marks_date_as_synced() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        assert!(!is_date_synced(&conn, "issues", "2026-03-01").unwrap());
+        log_sync(&conn, "issues", "2026-03-01", 123).unwrap();
+        assert!(is_date_synced(&conn, "issues", "2026-03-01").unwrap());
+    }
 }
