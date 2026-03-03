@@ -11,10 +11,6 @@ pub async fn fetch_day(
     date: NaiveDate,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let date_str = date.format("%Y-%m-%d").to_string();
-    if db::is_date_synced(conn, "workflow_runs", &date_str)? {
-        eprintln!("workflow_runs: {date_str} already synced, skipping");
-        return Ok(());
-    }
 
     let created = format!("{date_str}..{date_str}");
     let mut count = 0usize;
