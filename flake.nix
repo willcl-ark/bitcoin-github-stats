@@ -68,7 +68,10 @@
           inherit checks;
           formatter = treefmtEval.config.build.wrapper;
           devShells.default = craneLib.devShell {
-            packages = [ pkgs.just ];
+            packages = [
+              pkgs.just
+              pkgs.python313Packages.matplotlib
+            ];
           };
         };
       out = eachSystem perSystem;
