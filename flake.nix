@@ -47,6 +47,12 @@
           };
           checks = {
             inherit crate;
+            tests = craneLib.cargoTest (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+              }
+            );
             clippy = craneLib.cargoClippy (
               commonArgs
               // {
