@@ -65,3 +65,57 @@ pub async fn backfill(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use httpmock::Method::GET;
+    use httpmock::MockServer;
+    use octocrab::Octocrab;
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn build_test_client(server: &MockServer) -> Octocrab {
+        Octocrab::builder()
+            .base_uri(server.url("/"))
+            .unwrap()
+            .personal_token("test-token".to_string())
+            .build()
+            .unwrap()
+    }
+
+    fn temp_db_path() -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("/tmp/gh-stats-test-{}-{nanos}.db", std::process::id())
+    }
+
+    #[tokio::test]
+    async fn fetch_day_errors_when_workflow_runs_array_missing() {
+        let server = MockServer::start();
+        let client = build_test_client(&server);
+        let conn = crate::db::open(&temp_db_path()).unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
+
+        let rate = json!({
+            "resources": {
+                "core": {"limit": 5000, "used": 0, "remaining": 4000, "reset": 4102444800u64},
+                "search": {"limit": 30, "used": 0, "remaining": 30, "reset": 4102444800u64}
+            },
+            "rate": {"limit": 5000, "used": 0, "remaining": 4000, "reset": 4102444800u64}
+        });
+        let _rate_limit = server.mock(|when, then| {
+            when.method(GET).path("/rate_limit");
+            then.status(200).json_body(rate.clone());
+        });
+        let _runs = server.mock(|when, then| {
+            when.method(GET).path("/repos/bitcoin/bitcoin/actions/runs");
+            then.status(200).json_body(json!({}));
+        });
+
+        let err = fetch_day(&client, &conn, date).await;
+        assert!(err.is_err());
+    }
+}

@@ -169,3 +169,88 @@ fn parse_cursor_date(cursor: &str) -> Option<NaiveDate> {
     }
     NaiveDate::parse_from_str(&cursor[0..10], "%Y-%m-%d").ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use httpmock::Method::GET;
+    use httpmock::MockServer;
+    use octocrab::Octocrab;
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn build_test_client(server: &MockServer) -> Octocrab {
+        Octocrab::builder()
+            .base_uri(server.url("/"))
+            .unwrap()
+            .personal_token("test-token".to_string())
+            .build()
+            .unwrap()
+    }
+
+    fn temp_db_path() -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("/tmp/gh-stats-test-{}-{nanos}.db", std::process::id())
+    }
+
+    #[tokio::test]
+    async fn fetch_day_requests_second_page_when_first_has_100_items() {
+        let server = MockServer::start();
+        let client = build_test_client(&server);
+        let conn = crate::db::open(&temp_db_path()).unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
+
+        let rate = json!({
+            "resources": {
+                "core": {"limit": 5000, "used": 0, "remaining": 4000, "reset": 4102444800u64},
+                "search": {"limit": 30, "used": 0, "remaining": 30, "reset": 4102444800u64}
+            },
+            "rate": {"limit": 5000, "used": 0, "remaining": 4000, "reset": 4102444800u64}
+        });
+        let _rate_limit = server.mock(|when, then| {
+            when.method(GET).path("/rate_limit");
+            then.status(200).json_body(rate.clone());
+        });
+
+        let mut page1 = Vec::new();
+        for i in 0..100usize {
+            page1.push(json!({
+                "id": i as i64 + 1,
+                "number": i as i64 + 1,
+                "title": format!("Issue {i}"),
+                "state": "open",
+                "user": {"login": "alice"},
+                "created_at": "2026-03-01T00:00:00Z",
+                "updated_at": "2026-03-01T12:00:00Z",
+                "closed_at": null,
+                "comments": 0,
+                "labels": []
+            }));
+        }
+
+        let page1_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/repos/bitcoin/bitcoin/issues")
+                .query_param("page", "1");
+            then.status(200).json_body(json!(page1));
+        });
+        let page2_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/repos/bitcoin/bitcoin/issues")
+                .query_param("page", "2");
+            then.status(200).json_body(json!([]));
+        });
+
+        fetch_day(&client, &conn, date).await.unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM issues", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 100);
+        assert_eq!(page1_mock.hits(), 1);
+        assert_eq!(page2_mock.hits(), 1);
+    }
+}

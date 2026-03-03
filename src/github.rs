@@ -76,3 +76,36 @@ fn is_retryable_error(err: &octocrab::Error) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use httpmock::Method::GET;
+    use httpmock::MockServer;
+    use serde_json::json;
+
+    fn build_test_client(server: &MockServer) -> Octocrab {
+        Octocrab::builder()
+            .base_uri(server.url("/"))
+            .unwrap()
+            .personal_token("test-token".to_string())
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_with_retry_retries_on_500_then_fails() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/retry-me");
+            then.status(500).json_body(json!({
+                "message": "server error"
+            }));
+        });
+
+        let client = build_test_client(&server);
+        let err = get_with_retry::<serde_json::Value>(&client, "/retry-me").await;
+        assert!(err.is_err());
+        assert!(mock.hits() >= RETRY_MAX_ATTEMPTS);
+    }
+}
