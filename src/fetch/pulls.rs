@@ -22,14 +22,10 @@ pub async fn fetch_day(
     loop {
         github::check_rate_limit(client).await?;
 
-        let prs: Vec<serde_json::Value> = client
-            .get(
-                format!(
-                    "/repos/bitcoin/bitcoin/pulls?state=all&sort=updated&direction=desc&per_page=100&page={page}"
-                ),
-                None::<&()>,
-            )
-            .await?;
+        let path = format!(
+            "/repos/bitcoin/bitcoin/pulls?state=all&sort=updated&direction=desc&per_page=100&page={page}"
+        );
+        let prs: Vec<serde_json::Value> = github::get_with_retry(client, &path).await?;
 
         if prs.is_empty() {
             break;
@@ -96,14 +92,10 @@ async fn fetch_range(
     loop {
         github::check_rate_limit(client).await?;
 
-        let prs: Vec<serde_json::Value> = client
-            .get(
-                format!(
-                    "/repos/bitcoin/bitcoin/pulls?state=all&sort=updated&direction=desc&per_page=100&page={page}"
-                ),
-                None::<&()>,
-            )
-            .await?;
+        let path = format!(
+            "/repos/bitcoin/bitcoin/pulls?state=all&sort=updated&direction=desc&per_page=100&page={page}"
+        );
+        let prs: Vec<serde_json::Value> = github::get_with_retry(client, &path).await?;
 
         if prs.is_empty() {
             break;

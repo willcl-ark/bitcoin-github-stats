@@ -19,12 +19,10 @@ pub async fn fetch_day(
     loop {
         github::check_rate_limit(client).await?;
 
-        let resp: serde_json::Value = client
-            .get(
-                format!("/repos/bitcoin/bitcoin/actions/runs?created={created}&per_page=100&page={page}"),
-                None::<&()>,
-            )
-            .await?;
+        let path = format!(
+            "/repos/bitcoin/bitcoin/actions/runs?created={created}&per_page=100&page={page}"
+        );
+        let resp: serde_json::Value = github::get_with_retry(client, &path).await?;
 
         let runs = resp["workflow_runs"]
             .as_array()
