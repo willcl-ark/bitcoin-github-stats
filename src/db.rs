@@ -1,13 +1,40 @@
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
+
+const LATEST_SCHEMA_VERSION: i64 = 1;
 
 pub fn open(path: &str) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-    init_schema(&conn)?;
+    migrate_schema(&conn)?;
     Ok(conn)
 }
 
-fn init_schema(conn: &Connection) -> Result<()> {
+fn migrate_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER NOT NULL
+        );
+        ",
+    )?;
+    let current_version = conn
+        .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .optional()?
+        .unwrap_or(0);
+    if current_version < 1 {
+        apply_migration_1(conn)?;
+        conn.execute("DELETE FROM schema_version", [])?;
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            params![LATEST_SCHEMA_VERSION],
+        )?;
+    }
+    Ok(())
+}
+
+fn apply_migration_1(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS workflow_runs (
@@ -260,7 +287,7 @@ mod tests {
     #[test]
     fn upsert_workflow_run_updates_mutable_fields() {
         let conn = Connection::open_in_memory().unwrap();
-        init_schema(&conn).unwrap();
+        migrate_schema(&conn).unwrap();
 
         let first = json!({
             "id": 1,
@@ -316,7 +343,7 @@ mod tests {
     #[test]
     fn sync_state_round_trip() {
         let conn = Connection::open_in_memory().unwrap();
-        init_schema(&conn).unwrap();
+        migrate_schema(&conn).unwrap();
 
         assert_eq!(get_sync_cursor(&conn, "issues:fetch_day").unwrap(), None);
         set_sync_cursor(&conn, "issues:fetch_day", "2026-03-01T23:59:59Z").unwrap();
@@ -324,5 +351,16 @@ mod tests {
             get_sync_cursor(&conn, "issues:fetch_day").unwrap().as_deref(),
             Some("2026-03-01T23:59:59Z")
         );
+    }
+
+    #[test]
+    fn migrate_schema_sets_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_schema(&conn).unwrap();
+        let version: Option<i64> = conn
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| row.get(0))
+            .optional()
+            .unwrap();
+        assert_eq!(version, Some(LATEST_SCHEMA_VERSION));
     }
 }
