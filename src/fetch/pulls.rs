@@ -83,7 +83,7 @@ async fn fetch_range(
     let from_str = from.format("%Y-%m-%d").to_string();
     let to_str = to.format("%Y-%m-%d").to_string();
 
-    // For backfill, paginate ascending from oldest and collect all PRs in range
+    // For backfill, paginate by updated_at descending and collect PRs in range
     let range_key = format!("{from_str}..{to_str}");
     if db::is_date_synced(conn, "pull_requests", &range_key)? {
         eprintln!("pull_requests: {range_key} already synced, skipping");
