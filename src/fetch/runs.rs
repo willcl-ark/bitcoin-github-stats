@@ -6,6 +6,7 @@ use crate::db;
 use crate::github;
 
 const BACKFILL_CURSOR_KEY: &str = "workflow_runs:backfill:last_created_date";
+const FRESHNESS_WINDOW_DAYS: i64 = 3;
 
 pub async fn fetch_day(
     client: &Octocrab,
@@ -61,16 +62,17 @@ pub async fn backfill(
     to: NaiveDate,
     resume: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut date = from;
+    let cursor_date = if resume {
+        db::get_sync_cursor(conn, BACKFILL_CURSOR_KEY)?
+            .and_then(|cursor| NaiveDate::parse_from_str(&cursor, "%Y-%m-%d").ok())
+    } else {
+        None
+    };
+    let mut date = compute_backfill_start(from, to, cursor_date, resume);
     if resume {
-        if let Some(cursor) = db::get_sync_cursor(conn, BACKFILL_CURSOR_KEY)? {
-            if let Ok(cursor_date) = NaiveDate::parse_from_str(&cursor, "%Y-%m-%d") {
-                let next = cursor_date + chrono::Duration::days(1);
-                if next > date {
-                    date = next;
-                }
-            }
-        }
+        eprintln!(
+            "level=info source=workflow_runs op=backfill freshness_window_days={FRESHNESS_WINDOW_DAYS} start={date}"
+        );
     }
     if date > to {
         eprintln!("level=info source=workflow_runs op=backfill status=already_covered");
@@ -87,6 +89,29 @@ pub async fn backfill(
         date += chrono::Duration::days(1);
     }
     Ok(())
+}
+
+fn compute_backfill_start(
+    from: NaiveDate,
+    to: NaiveDate,
+    cursor_date: Option<NaiveDate>,
+    resume: bool,
+) -> NaiveDate {
+    let mut start = from;
+    if resume {
+        if let Some(cursor_date) = cursor_date {
+            let next = cursor_date + chrono::Duration::days(1);
+            if next > start {
+                start = next;
+            }
+        }
+    }
+    let freshness_start = std::cmp::max(from, to - chrono::Duration::days(FRESHNESS_WINDOW_DAYS - 1));
+    if start > freshness_start {
+        freshness_start
+    } else {
+        start
+    }
 }
 
 #[cfg(test)]
@@ -140,5 +165,15 @@ mod tests {
 
         let err = fetch_day(&client, &conn, date).await;
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn backfill_start_applies_freshness_window() {
+        let from = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
+        let to = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+        let cursor = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+
+        let start = compute_backfill_start(from, to, Some(cursor), true);
+        assert_eq!(start, NaiveDate::from_ymd_opt(2026, 3, 8).unwrap());
     }
 }
