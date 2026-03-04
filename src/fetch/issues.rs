@@ -1,4 +1,4 @@
-use chrono::{Datelike, NaiveDate};
+use chrono::NaiveDate;
 use octocrab::Octocrab;
 use rusqlite::Connection;
 
@@ -6,7 +6,7 @@ use crate::db;
 use crate::github;
 
 const FETCH_CURSOR_KEY: &str = "issues:fetch_day:last_updated_at";
-const BACKFILL_CURSOR_KEY: &str = "issues:backfill:last_updated_at";
+const BACKFILL_CURSOR_KEY: &str = "issues:backfill:page";
 
 pub async fn fetch_day(
     client: &Octocrab,
@@ -72,107 +72,52 @@ pub async fn fetch_day(
 pub async fn backfill(
     client: &Octocrab,
     conn: &Connection,
-    from: NaiveDate,
-    to: NaiveDate,
+    _from: NaiveDate,
+    _to: NaiveDate,
     resume: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut page = 1u32;
     if resume {
         if let Some(cursor) = db::get_sync_cursor(conn, BACKFILL_CURSOR_KEY)? {
-            if let Some(cursor_date) = parse_cursor_date(&cursor) {
-                let next = cursor_date + chrono::Duration::days(1);
-                if next > from {
-                    eprintln!("level=info source=issues op=backfill resume_from={next}");
-                }
+            if let Ok(p) = cursor.parse::<u32>() {
+                page = p;
+                eprintln!("level=info source=issues op=backfill resume_page={page}");
             }
         }
     }
 
-    // Chunk by month using `since` parameter
-    let mut chunk_start = from;
-    if resume {
-        if let Some(cursor) = db::get_sync_cursor(conn, BACKFILL_CURSOR_KEY)? {
-            if let Some(cursor_date) = parse_cursor_date(&cursor) {
-                let next = cursor_date + chrono::Duration::days(1);
-                if next > chunk_start {
-                    chunk_start = next;
-                }
-            }
-        }
-    }
-    if chunk_start > to {
-        eprintln!("level=info source=issues op=backfill status=already_covered");
-        return Ok(());
-    }
+    let mut total = 0usize;
+    loop {
+        github::check_rate_limit(client).await?;
 
-    while chunk_start <= to {
-        let chunk_end = {
-            let next_month = if chunk_start.month() == 12 {
-                NaiveDate::from_ymd_opt(chunk_start.year() + 1, 1, 1).unwrap()
-            } else {
-                NaiveDate::from_ymd_opt(chunk_start.year(), chunk_start.month() + 1, 1).unwrap()
-            };
-            std::cmp::min(next_month - chrono::Duration::days(1), to)
-        };
-
-        let range_key = format!(
-            "{}..{}",
-            chunk_start.format("%Y-%m-%d"),
-            chunk_end.format("%Y-%m-%d")
+        let path = format!(
+            "/repos/bitcoin/bitcoin/issues?state=all&sort=created&direction=asc&per_page=100&page={page}"
         );
+        let issues: Vec<serde_json::Value> = github::get_with_retry(client, &path).await?;
 
-        let since = format!("{}T00:00:00Z", chunk_start.format("%Y-%m-%d"));
-        let until_str = format!("{}T23:59:59Z", chunk_end.format("%Y-%m-%d"));
-        let mut count = 0usize;
-        let mut page = 1u32;
-
-        loop {
-            github::check_rate_limit(client).await?;
-
-            let path = format!(
-                "/repos/bitcoin/bitcoin/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100&page={page}"
-            );
-            let issues: Vec<serde_json::Value> = github::get_with_retry(client, &path).await?;
-
-            if issues.is_empty() {
-                break;
-            }
-
-            let tx = conn.unchecked_transaction()?;
-            let mut past_range = false;
-            for issue in &issues {
-                let updated = issue["updated_at"].as_str().unwrap_or("");
-                if updated > until_str.as_str() {
-                    past_range = true;
-                    break;
-                }
-                db::upsert_issue(&tx, issue)?;
-                count += 1;
-            }
-            tx.commit()?;
-
-            eprintln!("level=info source=issues op=backfill range={range_key} page={page} total={count}");
-
-            if past_range || issues.len() < 100 {
-                break;
-            }
-            page += 1;
+        if issues.is_empty() {
+            break;
         }
 
-        db::log_sync(conn, "issues", &range_key, count)?;
-        db::set_sync_cursor(conn, BACKFILL_CURSOR_KEY, &until_str)?;
-        eprintln!("level=info source=issues op=backfill range={range_key} status=done records={count}");
+        let tx = conn.unchecked_transaction()?;
+        for issue in &issues {
+            db::upsert_issue(&tx, issue)?;
+            total += 1;
+        }
+        tx.commit()?;
 
-        chunk_start = chunk_end + chrono::Duration::days(1);
+        eprintln!("level=info source=issues op=backfill page={page} total={total}");
+        db::set_sync_cursor(conn, BACKFILL_CURSOR_KEY, &page.to_string())?;
+
+        if issues.len() < 100 {
+            break;
+        }
+        page += 1;
     }
 
+    db::log_sync(conn, "issues", "backfill", total)?;
+    eprintln!("level=info source=issues op=backfill status=done records={total}");
     Ok(())
-}
-
-fn parse_cursor_date(cursor: &str) -> Option<NaiveDate> {
-    if cursor.len() < 10 {
-        return None;
-    }
-    NaiveDate::parse_from_str(&cursor[0..10], "%Y-%m-%d").ok()
 }
 
 #[cfg(test)]
