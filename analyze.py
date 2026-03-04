@@ -2,36 +2,20 @@
 """
 Bitcoin Core GitHub Statistics Report
 Analyzes 12 months of scraped data from bitcoin/bitcoin.
-Outputs a single self-contained HTML file.
+Outputs a single self-contained HTML file with interactive Chart.js charts.
 """
 
-import base64
-import io
 import sqlite3
 import json
 from datetime import datetime, timedelta
 from collections import Counter
 from html import escape
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 import numpy as np
 
 DB_PATH = "gh-stats.db"
 OUT_FILE = "report.html"
 CUTOFF = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-plt.rcParams.update({
-    "figure.figsize": (14, 6),
-    "figure.dpi": 150,
-    "axes.grid": True,
-    "grid.alpha": 0.3,
-    "font.size": 11,
-    "axes.titlesize": 14,
-    "axes.titleweight": "bold",
-})
 
 COLORS = {
     "blue": "#1f77b4",
@@ -43,6 +27,8 @@ COLORS = {
     "pink": "#e377c2",
     "gray": "#7f7f7f",
 }
+
+CHART_ID = 0
 
 
 def connect():
@@ -66,14 +52,23 @@ def month_key(dt):
     return dt.strftime("%Y-%m")
 
 
-def fig_to_img_tag(fig):
-    fig.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png")
-    plt.close(fig)
-    buf.seek(0)
-    b64 = base64.b64encode(buf.read()).decode("ascii")
-    return f'<img src="data:image/png;base64,{b64}">'
+def chart(spec):
+    global CHART_ID
+    CHART_ID += 1
+    cid = f"chart_{CHART_ID}"
+    return (
+        f'<div class="chart-wrap"><canvas id="{cid}"></canvas></div>\n'
+        f"<script>new Chart(document.getElementById('{cid}'), {json.dumps(spec)});</script>\n"
+    )
+
+
+def histogram_bins(values, n_bins=50, cap=None):
+    if cap is not None:
+        values = [min(v, cap) for v in values]
+    arr = np.array(values)
+    counts, edges = np.histogram(arr, bins=n_bins)
+    labels = [f"{edges[i]:.0f}-{edges[i+1]:.0f}" for i in range(len(counts))]
+    return labels, counts.tolist()
 
 
 # ──────────────────────────────────────────────
@@ -111,6 +106,32 @@ def ranking_table(title, headers, rows):
     return html
 
 
+def heatmap_table(data, row_labels, col_labels, title):
+    max_val = max(max(row) for row in data) or 1
+    html = f"<h3>{escape(title)}</h3>\n"
+    html += '<table class="heatmap"><tr><th></th>'
+    for c in col_labels:
+        html += f"<th>{escape(str(c))}</th>"
+    html += "</tr>\n"
+    for i, row_label in enumerate(row_labels):
+        html += f"<tr><td class='hm-label'>{escape(str(row_label))}</td>"
+        for j, val in enumerate(data[i]):
+            intensity = val / max_val
+            r = int(255 - intensity * (255 - 215))
+            g = int(255 - intensity * (255 - 48))
+            b = int(255 - intensity * (255 - 39))
+            bg = f"rgb({r},{g},{b})"
+            fg = "#fff" if intensity > 0.5 else "#333"
+            html += (
+                f'<td class="hm-cell" style="background:{bg};color:{fg}" '
+                f'title="{row_label} {col_labels[j]}:00 UTC — {int(val)} events">'
+                f"{int(val)}</td>"
+            )
+        html += "</tr>\n"
+    html += "</table>\n"
+    return html
+
+
 # ──────────────────────────────────────────────
 # Data loaders
 # ──────────────────────────────────────────────
@@ -129,7 +150,7 @@ def load_runs(conn):
 
 
 # ──────────────────────────────────────────────
-# Report sections — each returns an HTML string
+# Report sections
 # ──────────────────────────────────────────────
 
 def report_overview(conn):
@@ -143,11 +164,9 @@ def report_overview(conn):
     issue_count = conn.execute(
         "SELECT COUNT(*) FROM issues WHERE is_pull_request = 0 AND created_at >= ?", (CUTOFF,)
     ).fetchone()[0]
-
     pr_range = conn.execute(
         "SELECT MIN(created_at), MAX(created_at) FROM pull_requests WHERE created_at >= ?", (CUTOFF,)
     ).fetchone()
-
     unique_pr = conn.execute(
         "SELECT COUNT(DISTINCT user_login) FROM pull_requests WHERE created_at >= ?", (CUTOFF,)
     ).fetchone()[0]
@@ -223,43 +242,47 @@ def report_pr_activity(prs):
             merged_by_month[month_key(dt)] += 1
 
     months = sorted(set(opened_by_month) | set(merged_by_month))
-    fig, ax = plt.subplots()
-    x = range(len(months))
-    w = 0.4
-    ax.bar([i - w/2 for i in x], [opened_by_month[m] for m in months], w,
-           label="Opened", color=COLORS["blue"])
-    ax.bar([i + w/2 for i in x], [merged_by_month[m] for m in months], w,
-           label="Merged", color=COLORS["green"])
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(months, rotation=45, ha="right")
-    ax.set_title("Pull Requests Opened vs Merged per Month")
-    ax.set_ylabel("Count")
-    ax.legend()
-    html += fig_to_img_tag(fig)
+    html += chart({
+        "type": "bar",
+        "data": {
+            "labels": months,
+            "datasets": [
+                {"label": "Opened", "data": [opened_by_month[m] for m in months],
+                 "backgroundColor": COLORS["blue"]},
+                {"label": "Merged", "data": [merged_by_month[m] for m in months],
+                 "backgroundColor": COLORS["green"]},
+            ],
+        },
+        "options": {"plugins": {"title": {"display": True, "text": "Pull Requests Opened vs Merged per Month"}}},
+    })
 
     # Chart: Time to merge distribution
     if merge_days:
-        fig, ax = plt.subplots()
-        capped = [min(d, 365) for d in merge_days]
-        ax.hist(capped, bins=50, color=COLORS["blue"], edgecolor="white", alpha=0.8)
-        ax.axvline(np.median(merge_days), color=COLORS["red"], linestyle="--",
-                    label=f"Median: {np.median(merge_days):.0f}d")
-        ax.set_title("Time to Merge Distribution (capped at 365 days)")
-        ax.set_xlabel("Days")
-        ax.set_ylabel("PR Count")
-        ax.legend()
-        html += fig_to_img_tag(fig)
+        labels, counts = histogram_bins(merge_days, 40, cap=365)
+        html += chart({
+            "type": "bar",
+            "data": {
+                "labels": labels,
+                "datasets": [{"label": "PRs", "data": counts, "backgroundColor": COLORS["blue"]}],
+            },
+            "options": {
+                "plugins": {"title": {"display": True, "text": "Time to Merge Distribution (capped at 365 days)"}},
+                "scales": {"x": {"ticks": {"maxTicksLimit": 15}}},
+            },
+        })
 
     # Chart: PR state breakdown
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.pie([len(merged), len(closed_no_merge), len(open_prs)],
-           labels=["Merged", "Closed (no merge)", "Open"],
-           colors=[COLORS["green"], COLORS["red"], COLORS["blue"]],
-           autopct="%1.1f%%", startangle=90)
-    ax.set_title("Pull Request State Breakdown")
-    html += fig_to_img_tag(fig)
+    html += chart({
+        "type": "doughnut",
+        "data": {
+            "labels": ["Merged", "Closed (no merge)", "Open"],
+            "datasets": [{"data": [len(merged), len(closed_no_merge), len(open_prs)],
+                          "backgroundColor": [COLORS["green"], COLORS["red"], COLORS["blue"]]}],
+        },
+        "options": {"plugins": {"title": {"display": True, "text": "Pull Request State Breakdown"}}},
+    })
 
-    # Chart: Median merge time trend
+    # Chart: Median merge time trend with IQR
     monthly_merge_times = {}
     for pr in merged:
         created, m = parse_dt(pr["created_at"]), parse_dt(pr["merged_at"])
@@ -268,20 +291,32 @@ def report_pr_activity(prs):
             monthly_merge_times.setdefault(mk, []).append(
                 (m - created).total_seconds() / 86400
             )
-
     months_mt = sorted(monthly_merge_times)
     if months_mt:
-        fig, ax = plt.subplots()
-        medians = [np.median(monthly_merge_times[m]) for m in months_mt]
-        p25 = [np.percentile(monthly_merge_times[m], 25) for m in months_mt]
-        p75 = [np.percentile(monthly_merge_times[m], 75) for m in months_mt]
-        ax.fill_between(range(len(months_mt)), p25, p75, alpha=0.2, color=COLORS["blue"])
-        ax.plot(medians, color=COLORS["blue"], marker="o", markersize=4)
-        ax.set_xticks(range(len(months_mt)))
-        ax.set_xticklabels(months_mt, rotation=45, ha="right")
-        ax.set_title("Median Time to Merge Trend (with IQR)")
-        ax.set_ylabel("Days")
-        html += fig_to_img_tag(fig)
+        medians = [round(float(np.median(monthly_merge_times[m])), 1) for m in months_mt]
+        p25 = [round(float(np.percentile(monthly_merge_times[m], 25)), 1) for m in months_mt]
+        p75 = [round(float(np.percentile(monthly_merge_times[m], 75)), 1) for m in months_mt]
+        html += chart({
+            "type": "line",
+            "data": {
+                "labels": months_mt,
+                "datasets": [
+                    {"label": "75th percentile", "data": p75,
+                     "backgroundColor": "rgba(31,119,180,0.1)", "borderColor": "transparent",
+                     "fill": True, "pointRadius": 0},
+                    {"label": "Median", "data": medians,
+                     "borderColor": COLORS["blue"], "backgroundColor": "rgba(31,119,180,0.1)",
+                     "fill": "-1", "tension": 0.3},
+                    {"label": "25th percentile", "data": p25,
+                     "borderColor": "transparent", "backgroundColor": "transparent",
+                     "fill": False, "pointRadius": 0},
+                ],
+            },
+            "options": {
+                "plugins": {"title": {"display": True, "text": "Median Time to Merge Trend (with IQR)"}},
+                "scales": {"y": {"title": {"display": True, "text": "Days"}}},
+            },
+        })
 
     return html
 
@@ -302,7 +337,6 @@ def report_pr_authors(prs):
     html += ranking_table("Top 10 Authors by Merged PRs", ["#", "Author", "Merged"],
         [(i, u, f"{c:,}") for i, (u, c) in enumerate(top_merged, 1)])
 
-    # New PR authors per month
     first_pr = {}
     for pr in prs:
         user, dt = pr["user_login"], parse_dt(pr["created_at"])
@@ -312,7 +346,6 @@ def report_pr_authors(prs):
                 first_pr[user] = mk
     new_per_month = Counter(first_pr.values())
 
-    # Unique authors per month
     authors_per_month = {}
     for pr in prs:
         user, dt = pr["user_login"], parse_dt(pr["created_at"])
@@ -328,33 +361,37 @@ def report_pr_authors(prs):
                       f"{np.mean([len(authors_per_month[m]) for m in months_a]):.1f}"))
     html += stats_table(rows)
 
-    # Chart: Top 20 PR authors
-    fig, ax = plt.subplots()
-    users = [u for u, _ in top20]
-    counts = [c for _, c in top20]
-    ax.barh(users[::-1], counts[::-1], color=COLORS["blue"])
-    ax.set_title("Top 20 PR Authors")
-    ax.set_xlabel("Pull Requests")
-    html += fig_to_img_tag(fig)
+    # Chart: Top 20 PR authors (horizontal bar)
+    users = [u for u, _ in top20][::-1]
+    counts = [c for _, c in top20][::-1]
+    html += chart({
+        "type": "bar",
+        "data": {
+            "labels": users,
+            "datasets": [{"label": "PRs", "data": counts, "backgroundColor": COLORS["blue"]}],
+        },
+        "options": {
+            "indexAxis": "y",
+            "plugins": {"title": {"display": True, "text": "Top 20 PR Authors"}},
+        },
+    })
 
-    # Chart: Author diversity
+    # Chart: Author diversity (unique + new per month)
     if months_a:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-        ax1.bar(range(len(months_a)),
-                [len(authors_per_month[m]) for m in months_a],
-                color=COLORS["blue"])
-        ax1.set_xticks(range(len(months_a)))
-        ax1.set_xticklabels(months_a, rotation=45, ha="right")
-        ax1.set_title("Unique PR Authors per Month")
-        ax1.set_ylabel("Authors")
-
         nm = sorted(new_per_month)
-        ax2.bar(range(len(nm)), [new_per_month[m] for m in nm], color=COLORS["green"])
-        ax2.set_xticks(range(len(nm)))
-        ax2.set_xticklabels(nm, rotation=45, ha="right")
-        ax2.set_title("New (First-time) PR Authors per Month")
-        ax2.set_ylabel("New Authors")
-        html += fig_to_img_tag(fig)
+        html += chart({
+            "type": "bar",
+            "data": {
+                "labels": months_a,
+                "datasets": [
+                    {"label": "Unique authors", "data": [len(authors_per_month[m]) for m in months_a],
+                     "backgroundColor": COLORS["blue"]},
+                    {"label": "New (first-time) authors", "data": [new_per_month.get(m, 0) for m in months_a],
+                     "backgroundColor": COLORS["green"]},
+                ],
+            },
+            "options": {"plugins": {"title": {"display": True, "text": "PR Author Diversity per Month"}}},
+        })
 
     return html
 
@@ -375,25 +412,30 @@ def report_pr_timing(prs):
     weekday = sum(dow_counts.get(i, 0) for i in range(5))
     peak_hour = max(hour_counts, key=hour_counts.get) if hour_counts else 0
 
-    html += ranking_table("PRs Opened by Day of Week", ["Day", "Count"],
-        [(day, f"{dow_counts.get(i, 0):,}") for i, day in enumerate(days)])
     html += stats_table([
         ("Weekend vs weekday PR ratio", f"{weekend/(weekday or 1)*100:.1f}% of weekday volume"),
         ("Peak hour for PR creation (UTC)", f"{peak_hour}:00"),
     ])
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-    ax1.bar(days, [dow_counts.get(i, 0) for i in range(7)], color=COLORS["blue"])
-    ax1.set_title("PRs Opened by Day of Week")
-    ax1.set_ylabel("Count")
+    html += chart({
+        "type": "bar",
+        "data": {
+            "labels": days,
+            "datasets": [{"label": "PRs opened", "data": [dow_counts.get(i, 0) for i in range(7)],
+                          "backgroundColor": COLORS["blue"]}],
+        },
+        "options": {"plugins": {"title": {"display": True, "text": "PRs Opened by Day of Week"}}},
+    })
 
-    hours = list(range(24))
-    ax2.bar(hours, [hour_counts.get(h, 0) for h in hours], color=COLORS["orange"])
-    ax2.set_title("PRs Opened by Hour (UTC)")
-    ax2.set_xlabel("Hour (UTC)")
-    ax2.set_ylabel("Count")
-    ax2.set_xticks(hours[::2])
-    html += fig_to_img_tag(fig)
+    html += chart({
+        "type": "bar",
+        "data": {
+            "labels": [f"{h}:00" for h in range(24)],
+            "datasets": [{"label": "PRs opened", "data": [hour_counts.get(h, 0) for h in range(24)],
+                          "backgroundColor": COLORS["orange"]}],
+        },
+        "options": {"plugins": {"title": {"display": True, "text": "PRs Opened by Hour (UTC)"}}},
+    })
 
     return html
 
@@ -423,7 +465,6 @@ def report_issues(issues):
         ]
     html += stats_table(rows)
 
-    # Labels
     all_labels = []
     for iss in issues:
         raw = iss["labels"]
@@ -456,43 +497,52 @@ def report_issues(issues):
             closed_by_month[month_key(dt)] += 1
 
     months = sorted(set(opened_by_month) | set(closed_by_month))
-    fig, ax = plt.subplots()
-    x = range(len(months))
-    w = 0.4
-    ax.bar([i - w/2 for i in x], [opened_by_month[m] for m in months], w,
-           label="Opened", color=COLORS["blue"])
-    ax.bar([i + w/2 for i in x], [closed_by_month[m] for m in months], w,
-           label="Closed", color=COLORS["green"])
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(months, rotation=45, ha="right")
-    ax.set_title("Issues Opened vs Closed per Month")
-    ax.set_ylabel("Count")
-    ax.legend()
-    html += fig_to_img_tag(fig)
+    html += chart({
+        "type": "bar",
+        "data": {
+            "labels": months,
+            "datasets": [
+                {"label": "Opened", "data": [opened_by_month[m] for m in months],
+                 "backgroundColor": COLORS["blue"]},
+                {"label": "Closed", "data": [closed_by_month[m] for m in months],
+                 "backgroundColor": COLORS["green"]},
+            ],
+        },
+        "options": {"plugins": {"title": {"display": True, "text": "Issues Opened vs Closed per Month"}}},
+    })
 
-    # Chart: Issue labels
+    # Chart: Issue labels (horizontal bar)
     if top_labels:
-        fig, ax = plt.subplots(figsize=(14, 8))
-        ax.barh([l for l, _ in top_labels][::-1], [c for _, c in top_labels][::-1],
-                color=COLORS["purple"])
-        ax.set_title("Top 20 Issue Labels")
-        ax.set_xlabel("Count")
-        html += fig_to_img_tag(fig)
+        lab = [l for l, _ in top_labels][::-1]
+        cnt = [c for _, c in top_labels][::-1]
+        html += chart({
+            "type": "bar",
+            "data": {
+                "labels": lab,
+                "datasets": [{"label": "Issues", "data": cnt, "backgroundColor": COLORS["purple"]}],
+            },
+            "options": {
+                "indexAxis": "y",
+                "plugins": {"title": {"display": True, "text": "Top 20 Issue Labels"}},
+            },
+        })
 
     # Chart: Issue close time distribution
     if close_days:
-        fig, ax = plt.subplots()
-        capped = [min(d, 365) for d in close_days]
-        ax.hist(capped, bins=50, color=COLORS["green"], edgecolor="white", alpha=0.8)
-        ax.axvline(np.median(close_days), color=COLORS["red"], linestyle="--",
-                    label=f"Median: {np.median(close_days):.0f}d")
-        ax.set_title("Time to Close Issues (capped at 365 days)")
-        ax.set_xlabel("Days")
-        ax.set_ylabel("Count")
-        ax.legend()
-        html += fig_to_img_tag(fig)
+        labels, counts = histogram_bins(close_days, 40, cap=365)
+        html += chart({
+            "type": "bar",
+            "data": {
+                "labels": labels,
+                "datasets": [{"label": "Issues", "data": counts, "backgroundColor": COLORS["green"]}],
+            },
+            "options": {
+                "plugins": {"title": {"display": True, "text": "Time to Close Issues (capped at 365 days)"}},
+                "scales": {"x": {"ticks": {"maxTicksLimit": 15}}},
+            },
+        })
 
-    # Chart: Issue backlog
+    # Chart: Issue backlog (cumulative open)
     events = []
     for iss in issues:
         dt = parse_dt(iss["created_at"])
@@ -507,17 +557,28 @@ def report_issues(issues):
         cumulative, running, dates = [], 0, []
         for dt, delta in events:
             running += delta
-            dates.append(dt)
+            dates.append(dt.strftime("%Y-%m-%d"))
             cumulative.append(running)
 
-        fig, ax = plt.subplots()
-        ax.plot(dates, cumulative, color=COLORS["blue"], linewidth=0.8)
-        ax.set_title("Issue Backlog Over Time (Cumulative Open Issues)")
-        ax.set_ylabel("Open Issues")
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
-        plt.xticks(rotation=45)
-        html += fig_to_img_tag(fig)
+        html += chart({
+            "type": "line",
+            "data": {
+                "labels": dates,
+                "datasets": [{
+                    "label": "Open issues",
+                    "data": cumulative,
+                    "borderColor": COLORS["blue"],
+                    "backgroundColor": "rgba(31,119,180,0.1)",
+                    "fill": True,
+                    "pointRadius": 0,
+                    "tension": 0.3,
+                }],
+            },
+            "options": {
+                "plugins": {"title": {"display": True, "text": "Issue Backlog Over Time (Cumulative Open)"}},
+                "scales": {"x": {"ticks": {"maxTicksLimit": 12}}},
+            },
+        })
 
     return html
 
@@ -578,45 +639,68 @@ def report_commits(commits):
 
     # Chart: Commits per month
     months = sorted(by_month)
-    fig, ax = plt.subplots()
-    ax.bar(range(len(months)), [by_month[m] for m in months], color=COLORS["blue"])
-    ax.set_xticks(range(len(months)))
-    ax.set_xticklabels(months, rotation=45, ha="right")
-    ax.set_title("Commits per Month")
-    ax.set_ylabel("Commits")
-    html += fig_to_img_tag(fig)
+    html += chart({
+        "type": "bar",
+        "data": {
+            "labels": months,
+            "datasets": [{"label": "Commits", "data": [by_month[m] for m in months],
+                          "backgroundColor": COLORS["blue"]}],
+        },
+        "options": {"plugins": {"title": {"display": True, "text": "Commits per Month"}}},
+    })
 
-    # Chart: Commits by day of week and hour
+    # Chart: Commits by day of week
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-    ax1.bar(days, [dow_counts.get(i, 0) for i in range(7)], color=COLORS["green"])
-    ax1.set_title("Commits by Day of Week")
-    ax1.set_ylabel("Count")
-    hours = list(range(24))
-    ax2.bar(hours, [hour_counts.get(h, 0) for h in hours], color=COLORS["orange"])
-    ax2.set_title("Commits by Hour (UTC)")
-    ax2.set_xlabel("Hour (UTC)")
-    ax2.set_ylabel("Count")
-    ax2.set_xticks(hours[::2])
-    html += fig_to_img_tag(fig)
+    html += chart({
+        "type": "bar",
+        "data": {
+            "labels": days,
+            "datasets": [{"label": "Commits", "data": [dow_counts.get(i, 0) for i in range(7)],
+                          "backgroundColor": COLORS["green"]}],
+        },
+        "options": {"plugins": {"title": {"display": True, "text": "Commits by Day of Week"}}},
+    })
 
-    # Chart: Top 15 commit authors
-    fig, ax = plt.subplots()
-    ax.barh([u for u, _ in top_authors][::-1], [c for _, c in top_authors][::-1],
-            color=COLORS["green"])
-    ax.set_title("Top 15 Commit Authors")
-    ax.set_xlabel("Commits")
-    html += fig_to_img_tag(fig)
+    # Chart: Commits by hour
+    html += chart({
+        "type": "bar",
+        "data": {
+            "labels": [f"{h}:00" for h in range(24)],
+            "datasets": [{"label": "Commits", "data": [hour_counts.get(h, 0) for h in range(24)],
+                          "backgroundColor": COLORS["orange"]}],
+        },
+        "options": {"plugins": {"title": {"display": True, "text": "Commits by Hour (UTC)"}}},
+    })
 
-    # Chart: Unique authors per month
+    # Chart: Top 15 commit authors (horizontal bar)
+    html += chart({
+        "type": "bar",
+        "data": {
+            "labels": [u for u, _ in top_authors][::-1],
+            "datasets": [{"label": "Commits", "data": [c for _, c in top_authors][::-1],
+                          "backgroundColor": COLORS["green"]}],
+        },
+        "options": {
+            "indexAxis": "y",
+            "plugins": {"title": {"display": True, "text": "Top 15 Commit Authors"}},
+        },
+    })
+
+    # Chart: Unique commit authors per month
     if months_a:
-        fig, ax = plt.subplots()
-        ax.plot(months_a, [len(authors_monthly[m]) for m in months_a],
-                marker="o", color=COLORS["blue"])
-        ax.set_title("Unique Commit Authors per Month")
-        ax.set_ylabel("Authors")
-        plt.xticks(rotation=45, ha="right")
-        html += fig_to_img_tag(fig)
+        html += chart({
+            "type": "line",
+            "data": {
+                "labels": months_a,
+                "datasets": [{
+                    "label": "Unique authors",
+                    "data": [len(authors_monthly[m]) for m in months_a],
+                    "borderColor": COLORS["blue"],
+                    "tension": 0.3,
+                }],
+            },
+            "options": {"plugins": {"title": {"display": True, "text": "Unique Commit Authors per Month"}}},
+        })
 
     return html
 
@@ -668,12 +752,17 @@ def report_ci(runs):
     html += ranking_table("Top 15 CI Actors", ["#", "Actor", "Runs"],
         [(i, u, f"{c:,}") for i, (u, c) in enumerate(actor_counts.most_common(15), 1)])
 
-    # Chart: CI conclusion breakdown
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.pie(list(conclusion_counts.values()), labels=list(conclusion_counts.keys()),
-           autopct="%1.1f%%", startangle=90)
-    ax.set_title("CI Conclusion Breakdown")
-    html += fig_to_img_tag(fig)
+    # Chart: CI conclusion breakdown (doughnut)
+    html += chart({
+        "type": "doughnut",
+        "data": {
+            "labels": list(conclusion_counts.keys()),
+            "datasets": [{"data": list(conclusion_counts.values()),
+                          "backgroundColor": [COLORS["green"], COLORS["orange"],
+                                              COLORS["red"], COLORS["gray"], COLORS["purple"]]}],
+        },
+        "options": {"plugins": {"title": {"display": True, "text": "CI Conclusion Breakdown"}}},
+    })
 
     # Chart: CI success rate by month
     monthly_success, monthly_total = {}, {}
@@ -686,14 +775,23 @@ def report_ci(runs):
                 monthly_success[mk] = monthly_success.get(mk, 0) + 1
     months = sorted(monthly_total)
     if months:
-        fig, ax = plt.subplots()
-        rates = [monthly_success.get(m, 0) / monthly_total[m] * 100 for m in months]
-        ax.plot(months, rates, marker="o", color=COLORS["green"], linewidth=2)
-        ax.set_title("CI Success Rate by Month")
-        ax.set_ylabel("Success Rate (%)")
-        ax.set_ylim(0, 100)
-        plt.xticks(rotation=45, ha="right")
-        html += fig_to_img_tag(fig)
+        rates = [round(monthly_success.get(m, 0) / monthly_total[m] * 100, 1) for m in months]
+        html += chart({
+            "type": "line",
+            "data": {
+                "labels": months,
+                "datasets": [{
+                    "label": "Success rate (%)",
+                    "data": rates,
+                    "borderColor": COLORS["green"],
+                    "tension": 0.3,
+                }],
+            },
+            "options": {
+                "plugins": {"title": {"display": True, "text": "CI Success Rate by Month"}},
+                "scales": {"y": {"min": 0, "max": 100, "title": {"display": True, "text": "%"}}},
+            },
+        })
 
     # Chart: CI runs per month
     runs_by_month = Counter()
@@ -702,25 +800,31 @@ def report_ci(runs):
         if dt:
             runs_by_month[month_key(dt)] += 1
     months_r = sorted(runs_by_month)
-    fig, ax = plt.subplots()
-    ax.bar(range(len(months_r)), [runs_by_month[m] for m in months_r], color=COLORS["orange"])
-    ax.set_xticks(range(len(months_r)))
-    ax.set_xticklabels(months_r, rotation=45, ha="right")
-    ax.set_title("CI Runs per Month")
-    ax.set_ylabel("Runs")
-    html += fig_to_img_tag(fig)
+    html += chart({
+        "type": "bar",
+        "data": {
+            "labels": months_r,
+            "datasets": [{"label": "CI runs", "data": [runs_by_month[m] for m in months_r],
+                          "backgroundColor": COLORS["orange"]}],
+        },
+        "options": {"plugins": {"title": {"display": True, "text": "CI Runs per Month"}}},
+    })
 
     # Chart: CI run duration distribution
     if durations:
-        fig, ax = plt.subplots()
-        ax.hist(durations, bins=50, color=COLORS["blue"], edgecolor="white", alpha=0.8)
-        ax.axvline(np.median(durations), color=COLORS["red"], linestyle="--",
-                    label=f"Median: {np.median(durations):.0f}m")
-        ax.set_title("CI Run Duration Distribution (successful runs)")
-        ax.set_xlabel("Minutes")
-        ax.set_ylabel("Count")
-        ax.legend()
-        html += fig_to_img_tag(fig)
+        labels, counts = histogram_bins(durations, 40)
+        html += chart({
+            "type": "bar",
+            "data": {
+                "labels": labels,
+                "datasets": [{"label": "Runs", "data": counts, "backgroundColor": COLORS["blue"]}],
+            },
+            "options": {
+                "plugins": {"title": {"display": True, "text": "CI Run Duration Distribution (successful runs)"}},
+                "scales": {"x": {"ticks": {"maxTicksLimit": 15},
+                                 "title": {"display": True, "text": "Minutes"}}},
+            },
+        })
 
     # Chart: Failure rate by workflow name
     name_success, name_fail = Counter(), Counter()
@@ -734,14 +838,21 @@ def report_ci(runs):
     if wf_names:
         pairs = []
         for n in wf_names:
-            total = name_success.get(n, 0) + name_fail.get(n, 0)
-            pairs.append((n, name_fail.get(n, 0) / total * 100 if total else 0))
+            t = name_success.get(n, 0) + name_fail.get(n, 0)
+            pairs.append((n, round(name_fail.get(n, 0) / t * 100, 1) if t else 0))
         pairs.sort(key=lambda x: x[1], reverse=True)
-        fig, ax = plt.subplots()
-        ax.barh([p[0] for p in pairs][::-1], [p[1] for p in pairs][::-1], color=COLORS["red"])
-        ax.set_title("CI Failure Rate by Workflow (min 20 runs)")
-        ax.set_xlabel("Failure Rate (%)")
-        html += fig_to_img_tag(fig)
+        html += chart({
+            "type": "bar",
+            "data": {
+                "labels": [p[0] for p in pairs][::-1],
+                "datasets": [{"label": "Failure rate (%)", "data": [p[1] for p in pairs][::-1],
+                              "backgroundColor": COLORS["red"]}],
+            },
+            "options": {
+                "indexAxis": "y",
+                "plugins": {"title": {"display": True, "text": "CI Failure Rate by Workflow (min 20 runs)"}},
+            },
+        })
 
     return html
 
@@ -779,22 +890,25 @@ def report_cross_cutting(prs, issues, commits, runs):
         ("Contributors active in all 3 areas", str(len(all_three))),
     ])
 
-    # Chart: Project velocity
-    fig, ax = plt.subplots()
-    x = range(len(months))
+    # Chart: Project velocity (stacked bar)
     c_vals = [commit_monthly.get(m, 0) for m in months]
     p_vals = [pr_monthly.get(m, 0) for m in months]
     i_vals = [issue_monthly.get(m, 0) for m in months]
-    ax.bar(x, c_vals, label="Commits", color=COLORS["green"])
-    ax.bar(x, p_vals, bottom=c_vals, label="PRs", color=COLORS["blue"])
-    ax.bar(x, i_vals, bottom=[c + p for c, p in zip(c_vals, p_vals)],
-           label="Issues", color=COLORS["orange"])
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(months, rotation=45, ha="right")
-    ax.set_title("Overall Project Velocity (Stacked)")
-    ax.set_ylabel("Activity Count")
-    ax.legend()
-    html += fig_to_img_tag(fig)
+    html += chart({
+        "type": "bar",
+        "data": {
+            "labels": months,
+            "datasets": [
+                {"label": "Commits", "data": c_vals, "backgroundColor": COLORS["green"]},
+                {"label": "PRs", "data": p_vals, "backgroundColor": COLORS["blue"]},
+                {"label": "Issues", "data": i_vals, "backgroundColor": COLORS["orange"]},
+            ],
+        },
+        "options": {
+            "plugins": {"title": {"display": True, "text": "Overall Project Velocity (Stacked)"}},
+            "scales": {"x": {"stacked": True}, "y": {"stacked": True}},
+        },
+    })
 
     # Chart: Contributor overlap
     pr_only = pr_authors - issue_authors - commit_authors
@@ -808,21 +922,24 @@ def report_cross_cutting(prs, issues, commits, runs):
                    "PR + Issue", "PR + Commit", "Issue + Commit", "All three"]
     sizes = [len(pr_only), len(issue_only), len(commit_only),
              len(pr_issue), len(pr_commit), len(issue_commit), len(all_three)]
+    bar_colors = [COLORS["blue"], COLORS["orange"], COLORS["green"],
+                  COLORS["purple"], COLORS["brown"], COLORS["pink"], COLORS["red"]]
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    bars = ax.barh(categories[::-1], sizes[::-1],
-                   color=[COLORS["blue"], COLORS["green"], COLORS["orange"],
-                          COLORS["purple"], COLORS["brown"], COLORS["pink"],
-                          COLORS["red"]][::-1])
-    ax.set_title("Contributor Activity Overlap")
-    ax.set_xlabel("Contributors")
-    for bar, val in zip(bars, sizes[::-1]):
-        ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height()/2,
-                str(val), va="center")
-    html += fig_to_img_tag(fig)
+    html += chart({
+        "type": "bar",
+        "data": {
+            "labels": categories[::-1],
+            "datasets": [{"label": "Contributors", "data": sizes[::-1],
+                          "backgroundColor": bar_colors[::-1]}],
+        },
+        "options": {
+            "indexAxis": "y",
+            "plugins": {"title": {"display": True, "text": "Contributor Activity Overlap"}},
+        },
+    })
 
-    # Chart: Activity heatmap
-    dow_hour = np.zeros((7, 24))
+    # Heatmap: Activity by day of week and hour
+    dow_hour = [[0]*24 for _ in range(7)]
     for pr in prs:
         dt = parse_dt(pr["created_at"])
         if dt:
@@ -832,17 +949,9 @@ def report_cross_cutting(prs, issues, commits, runs):
         if dt:
             dow_hour[dt.weekday()][dt.hour] += 1
 
-    fig, ax = plt.subplots(figsize=(16, 5))
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    im = ax.imshow(dow_hour, aspect="auto", cmap="YlOrRd")
-    ax.set_yticks(range(7))
-    ax.set_yticklabels(days)
-    ax.set_xticks(range(24))
-    ax.set_xticklabels([str(h) for h in range(24)])
-    ax.set_xlabel("Hour (UTC)")
-    ax.set_title("Activity Heatmap: Day of Week vs Hour (PRs + Commits)")
-    fig.colorbar(im, ax=ax, label="Activity Count")
-    html += fig_to_img_tag(fig)
+    html += heatmap_table(dow_hour, days, list(range(24)),
+                          "Activity Heatmap: Day of Week vs Hour (PRs + Commits)")
 
     return html
 
@@ -853,6 +962,7 @@ HTML_TEMPLATE = """\
 <head>
 <meta charset="utf-8">
 <title>Bitcoin Core GitHub Statistics Report</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
   body {{
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
@@ -881,12 +991,12 @@ HTML_TEMPLATE = """\
     color: #333;
   }}
   h3 {{ color: #555; }}
-  img {{
+  .chart-wrap {{
     max-width: 100%;
-    height: auto;
-    display: block;
     margin: 1.5rem 0;
+    background: #fff;
     border-radius: 4px;
+    padding: 1rem;
     box-shadow: 0 1px 4px rgba(0,0,0,0.1);
   }}
   table {{
@@ -916,6 +1026,29 @@ HTML_TEMPLATE = """\
     border-bottom: 1px solid #eee;
     font-family: "SF Mono", "Menlo", monospace;
     font-size: 0.9em;
+  }}
+  table.heatmap {{
+    border-collapse: collapse;
+    margin: 1.5rem 0;
+    font-size: 0.75em;
+  }}
+  table.heatmap th {{
+    padding: 0.3rem 0.4rem;
+    font-weight: normal;
+    color: #555;
+  }}
+  table.heatmap .hm-label {{
+    text-align: right;
+    padding-right: 0.6rem;
+    font-weight: 600;
+    color: #333;
+  }}
+  table.heatmap .hm-cell {{
+    text-align: center;
+    padding: 0.3rem 0.4rem;
+    min-width: 2rem;
+    border-radius: 2px;
+    cursor: default;
   }}
 </style>
 </head>
