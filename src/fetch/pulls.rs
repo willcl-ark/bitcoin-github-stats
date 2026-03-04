@@ -1,4 +1,3 @@
-use chrono::NaiveDate;
 use octocrab::Octocrab;
 use rusqlite::Connection;
 
@@ -6,12 +5,12 @@ use crate::db;
 use crate::github;
 
 const FETCH_CURSOR_KEY: &str = "pull_requests:fetch_day:last_updated_at";
-const BACKFILL_CURSOR_KEY: &str = "pull_requests:backfill:last_updated_at";
+const BACKFILL_CURSOR_KEY: &str = "pull_requests:backfill:page";
 
 pub async fn fetch_day(
     client: &Octocrab,
     conn: &Connection,
-    date: NaiveDate,
+    date: chrono::NaiveDate,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let date_str = date.format("%Y-%m-%d").to_string();
     let day_end = format!("{date_str}T23:59:59Z");
@@ -44,7 +43,6 @@ pub async fn fetch_day(
         for pr in &prs {
             let updated = pr["updated_at"].as_str().unwrap_or("");
             if updated < date_str.as_str() {
-                // This PR was last updated before our target date — stop
                 all_before_date = true;
                 break;
             }
@@ -75,51 +73,28 @@ pub async fn fetch_day(
 pub async fn backfill(
     client: &Octocrab,
     conn: &Connection,
-    from: NaiveDate,
-    to: NaiveDate,
+    _from: chrono::NaiveDate,
+    _to: chrono::NaiveDate,
     resume: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut effective_from = from;
+    let mut page = 1u32;
     if resume {
         if let Some(cursor) = db::get_sync_cursor(conn, BACKFILL_CURSOR_KEY)? {
-            if let Some(cursor_date) = parse_cursor_date(&cursor) {
-                let next = cursor_date + chrono::Duration::days(1);
-                if next > effective_from {
-                    effective_from = next;
-                }
+            if let Ok(p) = cursor.parse::<u32>() {
+                page = p;
+                eprintln!(
+                    "level=info source=pull_requests op=backfill resume_page={page}"
+                );
             }
         }
     }
-    if effective_from > to {
-        eprintln!("level=info source=pull_requests op=backfill status=already_covered");
-        return Ok(());
-    }
-    fetch_range(client, conn, effective_from, to).await?;
-    let final_cursor = format!("{}T23:59:59Z", to.format("%Y-%m-%d"));
-    db::set_sync_cursor(conn, BACKFILL_CURSOR_KEY, &final_cursor)?;
-    Ok(())
-}
 
-async fn fetch_range(
-    client: &Octocrab,
-    conn: &Connection,
-    from: NaiveDate,
-    to: NaiveDate,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let from_str = from.format("%Y-%m-%d").to_string();
-    let to_str = to.format("%Y-%m-%d").to_string();
-
-    // For backfill, paginate by updated_at descending and collect PRs in range
-    let range_key = format!("{from_str}..{to_str}");
-
-    let mut count = 0usize;
-    let mut page = 1u32;
-
+    let mut total = 0usize;
     loop {
         github::check_rate_limit(client).await?;
 
         let path = format!(
-            "/repos/bitcoin/bitcoin/pulls?state=all&sort=updated&direction=desc&per_page=100&page={page}"
+            "/repos/bitcoin/bitcoin/pulls?state=all&sort=created&direction=asc&per_page=100&page={page}"
         );
         let prs: Vec<serde_json::Value> = github::get_with_retry(client, &path).await?;
 
@@ -128,36 +103,26 @@ async fn fetch_range(
         }
 
         let tx = conn.unchecked_transaction()?;
-        let mut before_range = false;
         for pr in &prs {
-            let updated = pr["updated_at"].as_str().unwrap_or("");
-            if updated < format!("{from_str}T00:00:00Z").as_str() {
-                before_range = true;
-                break;
-            }
-            if updated <= format!("{to_str}T23:59:59Z").as_str() {
-                db::upsert_pull_request(&tx, pr)?;
-                count += 1;
-            }
+            db::upsert_pull_request(&tx, pr)?;
+            total += 1;
         }
         tx.commit()?;
 
-        eprintln!("level=info source=pull_requests op=backfill page={page} total={count}");
+        eprintln!(
+            "level=info source=pull_requests op=backfill page={page} total={total}"
+        );
+        db::set_sync_cursor(conn, BACKFILL_CURSOR_KEY, &page.to_string())?;
 
-        if before_range || prs.len() < 100 {
+        if prs.len() < 100 {
             break;
         }
         page += 1;
     }
 
-    db::log_sync(conn, "pull_requests", &range_key, count)?;
-    eprintln!("level=info source=pull_requests op=backfill range={range_key} status=done records={count}");
+    db::log_sync(conn, "pull_requests", "backfill", total)?;
+    eprintln!(
+        "level=info source=pull_requests op=backfill status=done records={total}"
+    );
     Ok(())
-}
-
-fn parse_cursor_date(cursor: &str) -> Option<NaiveDate> {
-    if cursor.len() < 10 {
-        return None;
-    }
-    NaiveDate::parse_from_str(&cursor[0..10], "%Y-%m-%d").ok()
 }

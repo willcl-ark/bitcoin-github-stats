@@ -7,6 +7,7 @@ use crate::github;
 
 const BACKFILL_CURSOR_KEY: &str = "workflow_runs:backfill:last_created_date";
 const FRESHNESS_WINDOW_DAYS: i64 = 3;
+const RETENTION_DAYS: i64 = 400;
 
 pub async fn fetch_day(
     client: &Octocrab,
@@ -69,6 +70,15 @@ pub async fn backfill(
         None
     };
     let mut date = compute_backfill_start(from, to, cursor_date, resume);
+
+    let earliest = chrono::Utc::now().date_naive() - chrono::Duration::days(RETENTION_DAYS);
+    if date < earliest {
+        eprintln!(
+            "level=info source=workflow_runs op=backfill skip_before={earliest} reason=retention_limit_{RETENTION_DAYS}d"
+        );
+        date = earliest;
+    }
+
     if resume {
         eprintln!(
             "level=info source=workflow_runs op=backfill freshness_window_days={FRESHNESS_WINDOW_DAYS} start={date}"
