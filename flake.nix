@@ -70,8 +70,6 @@
           devShells.default = craneLib.devShell {
             packages = [
               pkgs.just
-              pkgs.python313Packages.matplotlib
-              pkgs.python313Packages.numpy
             ];
           };
         };

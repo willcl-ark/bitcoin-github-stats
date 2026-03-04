@@ -40,7 +40,21 @@ checkc:
 runc:
     cargo run
 
-# Sync to remove stats.fish.foo
+# Generate site/data.json from DB
 [group('admin')]
-sync:
-    rsync ./report.html seedbox-root:/var/www/stats/index.html
+generate:
+    python3 analyze.py
+
+# Serve site locally
+[group('admin')]
+serve:
+    python3 -m http.server 8000 -d site
+
+# Generate and serve
+[group('admin')]
+dev: generate serve
+
+# Sync to remote stats.fish.foo
+[group('admin')]
+sync: generate
+    rsync -a site/ seedbox-root:/var/www/stats/
