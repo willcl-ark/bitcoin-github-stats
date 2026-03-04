@@ -1,0 +1,53 @@
+name: Update Stats
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download DB from release
+        run: gh release download db-latest -p gh-stats.db || echo "Starting fresh"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build and fetch
+        run: |
+          cargo build --release
+          ./target/release/gh-stats fetch-day --date $(date -u -d yesterday +%Y-%m-%d)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate data.json
+        run: python3 analyze.py
+
+      - name: Upload DB to release
+        run: |
+          gh release upload db-latest gh-stats.db --clobber ||
+          gh release create db-latest gh-stats.db --title "Database" --notes "Auto-updated"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
