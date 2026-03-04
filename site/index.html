@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bitcoin Core GitHub Statistics</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem;
+    background: #fafafa;
+    color: #1a1a1a;
+  }
+  h1 {
+    border-bottom: 3px solid #f7931a;
+    padding-bottom: 0.5rem;
+  }
+  h1 small {
+    font-weight: normal;
+    color: #666;
+    font-size: 0.5em;
+    display: block;
+    margin-top: 0.3rem;
+  }
+  h2 {
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid #ddd;
+    color: #333;
+  }
+  h3 { color: #555; }
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 1rem 0 2rem;
+    flex-wrap: wrap;
+  }
+  .controls select {
+    padding: 0.3rem 0.5rem;
+    font-size: 0.95em;
+  }
+  .controls button {
+    padding: 0.35rem 1rem;
+    cursor: pointer;
+  }
+  .chart-wrap {
+    max-width: 100%;
+    margin: 1.5rem 0;
+    background: #fff;
+    border-radius: 4px;
+    padding: 1rem;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+  }
+  table { border-collapse: collapse; margin: 1rem 0; }
+  table.stats td {
+    padding: 0.35rem 1rem 0.35rem 0;
+    border-bottom: 1px solid #eee;
+  }
+  table.stats td:last-child {
+    font-family: "SF Mono", Menlo, monospace;
+    text-align: right;
+  }
+  table.ranking { width: auto; }
+  table.ranking th {
+    text-align: left;
+    padding: 0.4rem 1.2rem 0.4rem 0;
+    border-bottom: 2px solid #ddd;
+    color: #555;
+    font-size: 0.9em;
+  }
+  table.ranking td {
+    padding: 0.3rem 1.2rem 0.3rem 0;
+    border-bottom: 1px solid #eee;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 0.9em;
+  }
+  table.heatmap {
+    border-collapse: collapse;
+    margin: 1.5rem 0;
+    font-size: 0.75em;
+  }
+  table.heatmap th {
+    padding: 0.3rem 0.4rem;
+    font-weight: normal;
+    color: #555;
+  }
+  table.heatmap .hm-label {
+    text-align: right;
+    padding-right: 0.6rem;
+    font-weight: 600;
+    color: #333;
+  }
+  table.heatmap .hm-cell {
+    text-align: center;
+    padding: 0.3rem 0.4rem;
+    min-width: 2rem;
+    border-radius: 2px;
+    cursor: default;
+  }
+</style>
+</head>
+<body>
+
+<h1>Bitcoin Core — GitHub Statistics
+  <small id="subtitle"></small>
+</h1>
+
+<div class="controls">
+  <label>From <select id="sel-from"></select></label>
+  <label>To <select id="sel-to"></select></label>
+  <button id="btn-apply">Apply</button>
+  <button id="btn-12m">Last 12 months</button>
+</div>
+
+<section id="sec-overview"></section>
+<section id="sec-pr-activity"></section>
+<section id="sec-pr-authors"></section>
+<section id="sec-pr-timing"></section>
+<section id="sec-issues"></section>
+<section id="sec-commits"></section>
+<section id="sec-ci"></section>
+<section id="sec-cross"></section>
+
+<script>
+const C = {
+  blue: '#1f77b4', orange: '#ff7f0e', green: '#2ca02c', red: '#d62728',
+  purple: '#9467bd', brown: '#8c564b', pink: '#e377c2', gray: '#7f7f7f',
+};
+
+let DATA = null;
+let charts = [];
+
+// ── Utilities ──────────────────────────────────────────
+
+function median(arr) {
+  if (!arr.length) return 0;
+  const s = [...arr].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length & 1 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+function percentile(arr, p) {
+  if (!arr.length) return 0;
+  const s = [...arr].sort((a, b) => a - b);
+  const i = (p / 100) * (s.length - 1);
+  const lo = Math.floor(i), hi = Math.ceil(i);
+  return lo === hi ? s[lo] : s[lo] + (s[hi] - s[lo]) * (i - lo);
+}
+
+function mean(arr) {
+  return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+}
+
+function histogram(values, nBins = 40, cap = null) {
+  if (!values.length) return { labels: [], data: [] };
+  const vals = cap != null ? values.map(v => Math.min(v, cap)) : [...values];
+  const mn = Math.min(...vals), mx = Math.max(...vals);
+  const w = (mx - mn) / nBins || 1;
+  const counts = Array(nBins).fill(0);
+  const labels = [];
+  for (let i = 0; i < nBins; i++)
+    labels.push(`${Math.round(mn + i * w)}-${Math.round(mn + (i + 1) * w)}`);
+  for (const v of vals) {
+    let b = Math.floor((v - mn) / w);
+    if (b >= nBins) b = nBins - 1;
+    counts[b]++;
+  }
+  return { labels, data: counts };
+}
+
+function topN(map, n) {
+  return Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, n);
+}
+
+function fmt(n) { return n.toLocaleString(); }
+
+function statsHtml(rows) {
+  return '<table class="stats">' +
+    rows.map(([l, v]) => `<tr><td>${l}</td><td><strong>${v}</strong></td></tr>`).join('') +
+    '</table>';
+}
+
+function rankingHtml(title, headers, rows) {
+  return `<h3>${title}</h3><table class="ranking"><tr>${
+    headers.map(h => `<th>${h}</th>`).join('')
+  }</tr>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</table>`;
+}
+
+function cw(id) {
+  return `<div class="chart-wrap"><canvas id="${id}"></canvas></div>`;
+}
+
+function mk(id, config) {
+  const c = new Chart(document.getElementById(id), config);
+  charts.push(c);
+}
+
+// ── Aggregation ────────────────────────────────────────
+
+function aggregate(from, to) {
+  const allM = DATA.months;
+  const months = Object.keys(allM).filter(k => k >= from && k <= to).sort();
+  const agg = {
+    months,
+    prs_opened: 0, prs_merged: 0, prs_closed_no_merge: 0, prs_draft: 0,
+    issues_opened: 0, issues_closed: 0, commits: 0,
+    ci_total: 0, ci_retries: 0,
+    ci_by_conclusion: {}, ci_by_event: {}, ci_by_workflow: {},
+    pr_authors: {}, pr_merged_authors: {}, commit_authors: {}, committers: {},
+    issue_reporters: {}, ci_actors: {}, issue_labels: {},
+    pr_merge_times_days: [], pr_close_times_days: [],
+    issue_close_times_days: [], ci_durations_minutes: [],
+    pr_by_dow: Array(7).fill(0), pr_by_hour: Array(24).fill(0),
+    commit_by_dow: Array(7).fill(0), commit_by_hour: Array(24).fill(0),
+  };
+  const scalars = ['prs_opened','prs_merged','prs_closed_no_merge','prs_draft',
+    'issues_opened','issues_closed','commits','ci_total','ci_retries'];
+  const maps = ['ci_by_conclusion','ci_by_event','ci_by_workflow','pr_authors',
+    'pr_merged_authors','commit_authors','committers','issue_reporters',
+    'ci_actors','issue_labels'];
+  const arrs = ['pr_merge_times_days','pr_close_times_days',
+    'issue_close_times_days','ci_durations_minutes'];
+  const fixed = ['pr_by_dow','pr_by_hour','commit_by_dow','commit_by_hour'];
+
+  for (const mk of months) {
+    const m = allM[mk];
+    for (const k of scalars) agg[k] += m[k] || 0;
+    for (const k of maps)
+      for (const [name, cnt] of Object.entries(m[k] || {}))
+        agg[k][name] = (agg[k][name] || 0) + cnt;
+    for (const k of arrs) agg[k].push(...(m[k] || []));
+    for (const k of fixed) {
+      const src = m[k] || [];
+      for (let i = 0; i < agg[k].length; i++) agg[k][i] += src[i] || 0;
+    }
+  }
+  return agg;
+}
+
+// ── Section renderers ──────────────────────────────────
+
+function renderOverview(agg) {
+  const el = document.getElementById('sec-overview');
+  const from = agg.months[0], to = agg.months[agg.months.length - 1];
+  el.innerHTML = '<h2>1. Overview</h2>' + statsHtml([
+    ['Total workflow runs', fmt(agg.ci_total)],
+    ['Total pull requests', fmt(agg.prs_opened)],
+    ['Total issues (excluding PRs)', fmt(agg.issues_opened)],
+    ['Total commits', fmt(agg.commits)],
+    ['Data range', `${from} to ${to}`],
+    ['Unique PR authors', fmt(Object.keys(agg.pr_authors).length)],
+    ['Unique commit authors', fmt(Object.keys(agg.commit_authors).length)],
+  ]);
+}
+
+function renderPrActivity(agg) {
+  const el = document.getElementById('sec-pr-activity');
+  const totalClosed = agg.prs_merged + agg.prs_closed_no_merge;
+  const mergeRate = totalClosed ? (agg.prs_merged / totalClosed * 100).toFixed(1) : '0.0';
+  const rows = [
+    ['PRs merged', fmt(agg.prs_merged)],
+    ['PRs closed without merge', fmt(agg.prs_closed_no_merge)],
+    ['PRs currently open', fmt(DATA.current_open_prs)],
+    ['Merge rate (merged / all closed)', mergeRate + '%'],
+    ['Draft PRs', fmt(agg.prs_draft)],
+  ];
+  if (agg.pr_merge_times_days.length) {
+    const a = agg.pr_merge_times_days;
+    rows.push(['Median time to merge (days)', median(a).toFixed(1)]);
+    rows.push(['Mean time to merge (days)', mean(a).toFixed(1)]);
+    rows.push(['90th percentile time to merge (days)', percentile(a, 90).toFixed(1)]);
+    rows.push(['Fastest merge (hours)', (Math.min(...a) * 24).toFixed(1)]);
+  }
+  if (agg.pr_close_times_days.length)
+    rows.push(['Median time to close without merge (days)', median(agg.pr_close_times_days).toFixed(1)]);
+
+  el.innerHTML = '<h2>2. Pull Request Activity</h2>' + statsHtml(rows) +
+    cw('c-pr-month') + cw('c-merge-dist') + cw('c-pr-state') + cw('c-merge-trend');
+
+  const mths = agg.months;
+  mk('c-pr-month', {
+    type: 'bar',
+    data: {
+      labels: mths,
+      datasets: [
+        { label: 'Opened', data: mths.map(k => DATA.months[k].prs_opened || 0), backgroundColor: C.blue },
+        { label: 'Merged', data: mths.map(k => DATA.months[k].prs_merged || 0), backgroundColor: C.green },
+      ],
+    },
+    options: { plugins: { title: { display: true, text: 'Pull Requests Opened vs Merged per Month' } } },
+  });
+
+  if (agg.pr_merge_times_days.length) {
+    const h = histogram(agg.pr_merge_times_days, 40, 365);
+    mk('c-merge-dist', {
+      type: 'bar',
+      data: { labels: h.labels, datasets: [{ label: 'PRs', data: h.data, backgroundColor: C.blue }] },
+      options: {
+        plugins: { title: { display: true, text: 'Time to Merge Distribution (capped at 365 days)' } },
+        scales: { x: { ticks: { maxTicksLimit: 15 } } },
+      },
+    });
+  }
+
+  mk('c-pr-state', {
+    type: 'doughnut',
+    data: {
+      labels: ['Merged', 'Closed (no merge)', 'Open'],
+      datasets: [{ data: [agg.prs_merged, agg.prs_closed_no_merge, DATA.current_open_prs],
+                    backgroundColor: [C.green, C.red, C.blue] }],
+    },
+    options: { plugins: { title: { display: true, text: 'Pull Request State Breakdown' } } },
+  });
+
+  const monthlyMT = mths.map(k => DATA.months[k].pr_merge_times_days || []);
+  const mtsWithData = mths.filter((_, i) => monthlyMT[i].length);
+  if (mtsWithData.length) {
+    const meds = mtsWithData.map(k => +median(DATA.months[k].pr_merge_times_days).toFixed(1));
+    const q25 = mtsWithData.map(k => +percentile(DATA.months[k].pr_merge_times_days, 25).toFixed(1));
+    const q75 = mtsWithData.map(k => +percentile(DATA.months[k].pr_merge_times_days, 75).toFixed(1));
+    mk('c-merge-trend', {
+      type: 'line',
+      data: {
+        labels: mtsWithData,
+        datasets: [
+          { label: '75th pctl', data: q75, backgroundColor: 'rgba(31,119,180,0.1)',
+            borderColor: 'transparent', fill: true, pointRadius: 0 },
+          { label: 'Median', data: meds, borderColor: C.blue,
+            backgroundColor: 'rgba(31,119,180,0.1)', fill: '-1', tension: 0.3 },
+          { label: '25th pctl', data: q25, borderColor: 'transparent',
+            backgroundColor: 'transparent', fill: false, pointRadius: 0 },
+        ],
+      },
+      options: {
+        plugins: { title: { display: true, text: 'Median Time to Merge Trend (with IQR)' } },
+        scales: { y: { title: { display: true, text: 'Days' } } },
+      },
+    });
+  }
+}
+
+function renderPrAuthors(agg) {
+  const el = document.getElementById('sec-pr-authors');
+  const top20 = topN(agg.pr_authors, 20);
+  const topMerged = topN(agg.pr_merged_authors, 10);
+  const mths = agg.months;
+
+  const seen = new Set();
+  const newPerMonth = {};
+  for (const mk of mths) {
+    let count = 0;
+    for (const a of Object.keys(DATA.months[mk].pr_authors || {})) {
+      if (!seen.has(a)) { seen.add(a); count++; }
+    }
+    newPerMonth[mk] = count;
+  }
+  const uniquePerMonth = mths.map(mk => Object.keys(DATA.months[mk].pr_authors || {}).length);
+
+  const statsRows = [];
+  if (mths.length) {
+    statsRows.push(['Avg new PR authors per month', mean(mths.map(mk => newPerMonth[mk])).toFixed(1)]);
+    statsRows.push(['Avg unique PR authors per month', mean(uniquePerMonth).toFixed(1)]);
+  }
+
+  let html = '<h2>3. Pull Request Authors</h2>';
+  html += rankingHtml('Top 20 PR Authors', ['#', 'Author', 'PRs'],
+    top20.map(([u, c], i) => [i + 1, u, fmt(c)]));
+  html += rankingHtml('Top 10 Authors by Merged PRs', ['#', 'Author', 'Merged'],
+    topMerged.map(([u, c], i) => [i + 1, u, fmt(c)]));
+  if (statsRows.length) html += statsHtml(statsRows);
+  html += cw('c-pr-authors') + cw('c-author-diversity');
+  el.innerHTML = html;
+
+  const u20 = top20.map(x => x[0]).reverse();
+  const c20 = top20.map(x => x[1]).reverse();
+  mk('c-pr-authors', {
+    type: 'bar',
+    data: { labels: u20, datasets: [{ label: 'PRs', data: c20, backgroundColor: C.blue }] },
+    options: { indexAxis: 'y', plugins: { title: { display: true, text: 'Top 20 PR Authors' } } },
+  });
+
+  if (mths.length) {
+    mk('c-author-diversity', {
+      type: 'bar',
+      data: {
+        labels: mths,
+        datasets: [
+          { label: 'Unique authors', data: uniquePerMonth, backgroundColor: C.blue },
+          { label: 'New (first-time) authors', data: mths.map(mk => newPerMonth[mk]), backgroundColor: C.green },
+        ],
+      },
+      options: { plugins: { title: { display: true, text: 'PR Author Diversity per Month' } } },
+    });
+  }
+}
+
+function renderPrTiming(agg) {
+  const el = document.getElementById('sec-pr-timing');
+  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const weekend = agg.pr_by_dow[5] + agg.pr_by_dow[6];
+  const weekday = agg.pr_by_dow.slice(0, 5).reduce((a, b) => a + b, 0);
+  const peakHour = agg.pr_by_hour.indexOf(Math.max(...agg.pr_by_hour));
+
+  el.innerHTML = '<h2>4. Pull Request Timing Patterns</h2>' +
+    statsHtml([
+      ['Weekend vs weekday PR ratio', (weekend / (weekday || 1) * 100).toFixed(1) + '% of weekday volume'],
+      ['Peak hour for PR creation (UTC)', peakHour + ':00'],
+    ]) + cw('c-pr-dow') + cw('c-pr-hour');
+
+  mk('c-pr-dow', {
+    type: 'bar',
+    data: { labels: days, datasets: [{ label: 'PRs opened', data: agg.pr_by_dow, backgroundColor: C.blue }] },
+    options: { plugins: { title: { display: true, text: 'PRs Opened by Day of Week' } } },
+  });
+  mk('c-pr-hour', {
+    type: 'bar',
+    data: { labels: Array.from({ length: 24 }, (_, i) => i + ':00'),
+            datasets: [{ label: 'PRs opened', data: agg.pr_by_hour, backgroundColor: C.orange }] },
+    options: { plugins: { title: { display: true, text: 'PRs Opened by Hour (UTC)' } } },
+  });
+}
+
+function renderIssues(agg) {
+  const el = document.getElementById('sec-issues');
+  const mths = agg.months;
+  const topLabels = topN(agg.issue_labels, 20);
+  const topReporters = topN(agg.issue_reporters, 15);
+
+  const rows = [
+    ['Total issues (non-PR)', fmt(agg.issues_opened)],
+    ['Open issues', fmt(DATA.current_open_issues)],
+    ['Closed issues', fmt(agg.issues_closed)],
+  ];
+  if (agg.issue_close_times_days.length) {
+    rows.push(['Median time to close (days)', median(agg.issue_close_times_days).toFixed(1)]);
+    rows.push(['Mean time to close (days)', mean(agg.issue_close_times_days).toFixed(1)]);
+  }
+
+  let html = '<h2>5. Issues</h2>' + statsHtml(rows);
+  html += rankingHtml('Top 20 Issue Labels', ['#', 'Label', 'Count'],
+    topLabels.map(([l, c], i) => [i + 1, l, fmt(c)]));
+  html += rankingHtml('Top 15 Issue Reporters', ['#', 'Author', 'Issues'],
+    topReporters.map(([u, c], i) => [i + 1, u, fmt(c)]));
+  html += cw('c-issues-month') + cw('c-issue-labels') +
+    cw('c-issue-close-dist') + cw('c-issue-backlog');
+  el.innerHTML = html;
+
+  mk('c-issues-month', {
+    type: 'bar',
+    data: {
+      labels: mths,
+      datasets: [
+        { label: 'Opened', data: mths.map(k => DATA.months[k].issues_opened || 0), backgroundColor: C.blue },
+        { label: 'Closed', data: mths.map(k => DATA.months[k].issues_closed || 0), backgroundColor: C.green },
+      ],
+    },
+    options: { plugins: { title: { display: true, text: 'Issues Opened vs Closed per Month' } } },
+  });
+
+  if (topLabels.length) {
+    mk('c-issue-labels', {
+      type: 'bar',
+      data: { labels: topLabels.map(x => x[0]).reverse(),
+              datasets: [{ label: 'Issues', data: topLabels.map(x => x[1]).reverse(), backgroundColor: C.purple }] },
+      options: { indexAxis: 'y', plugins: { title: { display: true, text: 'Top 20 Issue Labels' } } },
+    });
+  }
+
+  if (agg.issue_close_times_days.length) {
+    const h = histogram(agg.issue_close_times_days, 40, 365);
+    mk('c-issue-close-dist', {
+      type: 'bar',
+      data: { labels: h.labels, datasets: [{ label: 'Issues', data: h.data, backgroundColor: C.green }] },
+      options: {
+        plugins: { title: { display: true, text: 'Time to Close Issues (capped at 365 days)' } },
+        scales: { x: { ticks: { maxTicksLimit: 15 } } },
+      },
+    });
+  }
+
+  // Issue backlog: cumulative open from monthly deltas
+  let running = 0;
+  const backlog = mths.map(k => {
+    running += (DATA.months[k].issues_opened || 0) - (DATA.months[k].issues_closed || 0);
+    return running;
+  });
+  mk('c-issue-backlog', {
+    type: 'line',
+    data: {
+      labels: mths,
+      datasets: [{
+        label: 'Open issues (cumulative delta)',
+        data: backlog,
+        borderColor: C.blue,
+        backgroundColor: 'rgba(31,119,180,0.1)',
+        fill: true, pointRadius: 0, tension: 0.3,
+      }],
+    },
+    options: {
+      plugins: { title: { display: true, text: 'Issue Backlog Over Time (Cumulative Open)' } },
+      scales: { x: { ticks: { maxTicksLimit: 12 } } },
+    },
+  });
+}
+
+function renderCommits(agg) {
+  const el = document.getElementById('sec-commits');
+  const mths = agg.months;
+  const topAuthors = topN(agg.commit_authors, 15);
+  const topCommitters = topN(agg.committers, 10);
+
+  const commitsPerMonth = mths.map(k => DATA.months[k].commits || 0);
+  const uniquePerMonth = mths.map(k => Object.keys(DATA.months[k].commit_authors || {}).length);
+
+  let total = 0;
+  for (const v of Object.values(agg.commit_authors)) total += v;
+  let cumsum = 0, busFactor = 0;
+  for (const [, cnt] of topN(agg.commit_authors, Infinity)) {
+    cumsum += cnt;
+    busFactor++;
+    if (cumsum >= total * 0.5) break;
+  }
+
+  const rows = [
+    ['Total commits', fmt(agg.commits)],
+    ['Avg commits per month', commitsPerMonth.length ? mean(commitsPerMonth).toFixed(1) : 'N/A'],
+    ['Avg unique commit authors per month', uniquePerMonth.length ? mean(uniquePerMonth).toFixed(1) : 'N/A'],
+    ['Bus factor (authors for 50% of commits)', busFactor],
+  ];
+
+  let html = '<h2>6. Commits</h2>' + statsHtml(rows);
+  html += rankingHtml('Top 15 Commit Authors', ['#', 'Author', 'Commits'],
+    topAuthors.map(([u, c], i) => [i + 1, u, fmt(c)]));
+  html += rankingHtml('Top 10 Committers (merge/push)', ['#', 'Committer', 'Commits'],
+    topCommitters.map(([u, c], i) => [i + 1, u, fmt(c)]));
+  html += cw('c-commits-month') + cw('c-commit-dow') + cw('c-commit-hour') +
+    cw('c-commit-authors') + cw('c-commit-unique');
+  el.innerHTML = html;
+
+  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  mk('c-commits-month', {
+    type: 'bar',
+    data: { labels: mths, datasets: [{ label: 'Commits', data: commitsPerMonth, backgroundColor: C.blue }] },
+    options: { plugins: { title: { display: true, text: 'Commits per Month' } } },
+  });
+  mk('c-commit-dow', {
+    type: 'bar',
+    data: { labels: days, datasets: [{ label: 'Commits', data: agg.commit_by_dow, backgroundColor: C.green }] },
+    options: { plugins: { title: { display: true, text: 'Commits by Day of Week' } } },
+  });
+  mk('c-commit-hour', {
+    type: 'bar',
+    data: { labels: Array.from({ length: 24 }, (_, i) => i + ':00'),
+            datasets: [{ label: 'Commits', data: agg.commit_by_hour, backgroundColor: C.orange }] },
+    options: { plugins: { title: { display: true, text: 'Commits by Hour (UTC)' } } },
+  });
+  mk('c-commit-authors', {
+    type: 'bar',
+    data: { labels: topAuthors.map(x => x[0]).reverse(),
+            datasets: [{ label: 'Commits', data: topAuthors.map(x => x[1]).reverse(), backgroundColor: C.green }] },
+    options: { indexAxis: 'y', plugins: { title: { display: true, text: 'Top 15 Commit Authors' } } },
+  });
+  if (mths.length) {
+    mk('c-commit-unique', {
+      type: 'line',
+      data: { labels: mths, datasets: [{ label: 'Unique authors', data: uniquePerMonth,
+              borderColor: C.blue, tension: 0.3 }] },
+      options: { plugins: { title: { display: true, text: 'Unique Commit Authors per Month' } } },
+    });
+  }
+}
+
+function renderCI(agg) {
+  const el = document.getElementById('sec-ci');
+  const mths = agg.months;
+  const cc = agg.ci_by_conclusion;
+  const success = cc.success || 0, failure = cc.failure || 0;
+  const successRate = (success + failure) ? (success / (success + failure) * 100).toFixed(1) : '0.0';
+
+  const rows = [['Total workflow runs', fmt(agg.ci_total)]];
+  for (const [conclusion, cnt] of topN(cc, Infinity)) {
+    const pct = agg.ci_total ? (cnt / agg.ci_total * 100).toFixed(1) : '0.0';
+    rows.push([`  ${conclusion}`, `${fmt(cnt)} (${pct}%)`]);
+  }
+  rows.push(['CI success rate (success / success+failure)', successRate + '%']);
+  rows.push(['Runs with retries (attempt > 1)', fmt(agg.ci_retries)]);
+  if (agg.ci_durations_minutes.length) {
+    rows.push(['Median CI run duration (min, success only)', median(agg.ci_durations_minutes).toFixed(1)]);
+    rows.push(['90th pctl CI duration (min)', percentile(agg.ci_durations_minutes, 90).toFixed(1)]);
+  }
+
+  let html = '<h2>7. CI / Workflow Runs</h2>' + statsHtml(rows);
+  html += rankingHtml('Runs by Event Type', ['Event', 'Count'],
+    topN(agg.ci_by_event, Infinity).map(([e, c]) => [e, fmt(c)]));
+  html += rankingHtml('Runs by Workflow Name', ['Workflow', 'Count'],
+    topN(agg.ci_by_workflow, Infinity).map(([n, c]) => [n, fmt(c)]));
+  html += rankingHtml('Top 15 CI Actors', ['#', 'Actor', 'Runs'],
+    topN(agg.ci_actors, 15).map(([u, c], i) => [i + 1, u, fmt(c)]));
+  html += cw('c-ci-conclusion') + cw('c-ci-success-rate') + cw('c-ci-month') +
+    cw('c-ci-dur-dist') + cw('c-ci-fail-wf');
+  el.innerHTML = html;
+
+  const ccKeys = Object.keys(cc);
+  const ccColors = [C.green, C.orange, C.red, C.gray, C.purple];
+  mk('c-ci-conclusion', {
+    type: 'doughnut',
+    data: { labels: ccKeys, datasets: [{ data: ccKeys.map(k => cc[k]),
+            backgroundColor: ccColors.slice(0, ccKeys.length) }] },
+    options: { plugins: { title: { display: true, text: 'CI Conclusion Breakdown' } } },
+  });
+
+  // Success rate by month
+  const rateByMonth = mths.map(k => {
+    const m = DATA.months[k];
+    const bc = m.ci_by_conclusion || {};
+    const s = bc.success || 0, f = bc.failure || 0;
+    return (s + f) ? +(s / (s + f) * 100).toFixed(1) : null;
+  });
+  mk('c-ci-success-rate', {
+    type: 'line',
+    data: { labels: mths, datasets: [{ label: 'Success rate (%)', data: rateByMonth,
+            borderColor: C.green, tension: 0.3 }] },
+    options: {
+      plugins: { title: { display: true, text: 'CI Success Rate by Month' } },
+      scales: { y: { min: 0, max: 100, title: { display: true, text: '%' } } },
+    },
+  });
+
+  mk('c-ci-month', {
+    type: 'bar',
+    data: { labels: mths, datasets: [{ label: 'CI runs',
+            data: mths.map(k => DATA.months[k].ci_total || 0), backgroundColor: C.orange }] },
+    options: { plugins: { title: { display: true, text: 'CI Runs per Month' } } },
+  });
+
+  if (agg.ci_durations_minutes.length) {
+    const h = histogram(agg.ci_durations_minutes, 40);
+    mk('c-ci-dur-dist', {
+      type: 'bar',
+      data: { labels: h.labels, datasets: [{ label: 'Runs', data: h.data, backgroundColor: C.blue }] },
+      options: {
+        plugins: { title: { display: true, text: 'CI Run Duration Distribution (successful runs)' } },
+        scales: { x: { ticks: { maxTicksLimit: 15 }, title: { display: true, text: 'Minutes' } } },
+      },
+    });
+  }
+
+  // Failure rate by workflow (min 20 runs)
+  const wfTotals = {}, wfFails = {};
+  for (const m of mths) {
+    const wfc = DATA.months[m].ci_wf_conclusions || {};
+    for (const [wf, cs] of Object.entries(wfc)) {
+      const s = cs.success || 0, f = cs.failure || 0;
+      wfTotals[wf] = (wfTotals[wf] || 0) + s + f;
+      wfFails[wf] = (wfFails[wf] || 0) + f;
+    }
+  }
+  const wfPairs = Object.keys(wfTotals)
+    .filter(wf => wfTotals[wf] >= 20)
+    .map(wf => [wf, +(wfFails[wf] / wfTotals[wf] * 100).toFixed(1)])
+    .sort((a, b) => b[1] - a[1]);
+  if (wfPairs.length) {
+    mk('c-ci-fail-wf', {
+      type: 'bar',
+      data: { labels: wfPairs.map(p => p[0]).reverse(),
+              datasets: [{ label: 'Failure rate (%)', data: wfPairs.map(p => p[1]).reverse(),
+                           backgroundColor: C.red }] },
+      options: { indexAxis: 'y',
+                 plugins: { title: { display: true, text: 'CI Failure Rate by Workflow (min 20 runs)' } } },
+    });
+  }
+}
+
+function renderCross(agg) {
+  const el = document.getElementById('sec-cross');
+  const mths = agg.months;
+
+  const prAuthors = new Set(Object.keys(agg.pr_authors));
+  const issueAuthors = new Set(Object.keys(agg.issue_reporters));
+  const commitAuthorsSet = new Set(Object.keys(agg.commit_authors));
+  const all = new Set([...prAuthors, ...issueAuthors, ...commitAuthorsSet]);
+  const allThree = [...prAuthors].filter(a => issueAuthors.has(a) && commitAuthorsSet.has(a));
+
+  const monthlyActivity = mths.map(k => {
+    const m = DATA.months[k];
+    return (m.prs_opened || 0) + (m.issues_opened || 0) + (m.commits || 0);
+  });
+
+  const rows = [
+    ['Avg monthly activity (PRs + issues + commits)',
+      monthlyActivity.length ? mean(monthlyActivity).toFixed(0) : 'N/A'],
+    ['Total unique contributors (all types)', fmt(all.size)],
+    ['Contributors active in all 3 areas', fmt(allThree.length)],
+  ];
+
+  let html = '<h2>8. Cross-Cutting Analysis</h2>' + statsHtml(rows) +
+    cw('c-velocity') + cw('c-overlap') + '<div id="heatmap-container"></div>';
+  el.innerHTML = html;
+
+  mk('c-velocity', {
+    type: 'bar',
+    data: {
+      labels: mths,
+      datasets: [
+        { label: 'Commits', data: mths.map(k => DATA.months[k].commits || 0), backgroundColor: C.green },
+        { label: 'PRs', data: mths.map(k => DATA.months[k].prs_opened || 0), backgroundColor: C.blue },
+        { label: 'Issues', data: mths.map(k => DATA.months[k].issues_opened || 0), backgroundColor: C.orange },
+      ],
+    },
+    options: {
+      plugins: { title: { display: true, text: 'Overall Project Velocity (Stacked)' } },
+      scales: { x: { stacked: true }, y: { stacked: true } },
+    },
+  });
+
+  const prOnly = [...prAuthors].filter(a => !issueAuthors.has(a) && !commitAuthorsSet.has(a));
+  const issueOnly = [...issueAuthors].filter(a => !prAuthors.has(a) && !commitAuthorsSet.has(a));
+  const commitOnly = [...commitAuthorsSet].filter(a => !prAuthors.has(a) && !issueAuthors.has(a));
+  const prIssue = [...prAuthors].filter(a => issueAuthors.has(a) && !commitAuthorsSet.has(a));
+  const prCommit = [...prAuthors].filter(a => !issueAuthors.has(a) && commitAuthorsSet.has(a));
+  const issueCommit = [...issueAuthors].filter(a => !prAuthors.has(a) && commitAuthorsSet.has(a));
+
+  const cats = ['PR only', 'Issue only', 'Commit only', 'PR + Issue', 'PR + Commit', 'Issue + Commit', 'All three'];
+  const sizes = [prOnly.length, issueOnly.length, commitOnly.length,
+    prIssue.length, prCommit.length, issueCommit.length, allThree.length];
+  const colors = [C.blue, C.orange, C.green, C.purple, C.brown, C.pink, C.red];
+
+  mk('c-overlap', {
+    type: 'bar',
+    data: { labels: cats.reverse(), datasets: [{ label: 'Contributors', data: sizes.reverse(),
+            backgroundColor: colors.reverse() }] },
+    options: { indexAxis: 'y', plugins: { title: { display: true, text: 'Contributor Activity Overlap' } } },
+  });
+
+  // Heatmap: combine PR + commit activity by day-of-week × hour
+  const dow = Array.from({ length: 7 }, () => Array(24).fill(0));
+  for (const m of mths) {
+    const adh = DATA.months[m].activity_dow_hour || [];
+    for (let d = 0; d < 7; d++)
+      for (let h = 0; h < 24; h++)
+        dow[d][h] += (adh[d] || [])[h] || 0;
+  }
+  const maxVal = Math.max(1, ...dow.flat());
+  const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  let hm = '<h3>Activity Heatmap: Day of Week vs Hour (PRs + Commits)</h3>';
+  hm += '<table class="heatmap"><tr><th></th>';
+  for (let h = 0; h < 24; h++) hm += `<th>${h}</th>`;
+  hm += '</tr>';
+  for (let d = 0; d < 7; d++) {
+    hm += `<tr><td class="hm-label">${dayNames[d]}</td>`;
+    for (let h = 0; h < 24; h++) {
+      const v = dow[d][h];
+      const intensity = v / maxVal;
+      const r = Math.round(255 - intensity * (255 - 215));
+      const g = Math.round(255 - intensity * (255 - 48));
+      const b = Math.round(255 - intensity * (255 - 39));
+      const fg = intensity > 0.5 ? '#fff' : '#333';
+      hm += `<td class="hm-cell" style="background:rgb(${r},${g},${b});color:${fg}" ` +
+        `title="${dayNames[d]} ${h}:00 UTC — ${v} events">${v}</td>`;
+    }
+    hm += '</tr>';
+  }
+  hm += '</table>';
+  document.getElementById('heatmap-container').innerHTML = hm;
+}
+
+// ── Init ───────────────────────────────────────────────
+
+function renderAll() {
+  for (const c of charts) c.destroy();
+  charts = [];
+
+  const from = document.getElementById('sel-from').value;
+  const to = document.getElementById('sel-to').value;
+  const agg = aggregate(from, to);
+
+  renderOverview(agg);
+  renderPrActivity(agg);
+  renderPrAuthors(agg);
+  renderPrTiming(agg);
+  renderIssues(agg);
+  renderCommits(agg);
+  renderCI(agg);
+  renderCross(agg);
+}
+
+async function init() {
+  const resp = await fetch('data.json');
+  DATA = await resp.json();
+
+  const allMonths = Object.keys(DATA.months).sort();
+  const selFrom = document.getElementById('sel-from');
+  const selTo = document.getElementById('sel-to');
+
+  for (const m of allMonths) {
+    selFrom.add(new Option(m, m));
+    selTo.add(new Option(m, m));
+  }
+
+  function setLast12() {
+    const end = allMonths.length - 1;
+    const start = Math.max(0, end - 11);
+    selFrom.value = allMonths[start];
+    selTo.value = allMonths[end];
+  }
+
+  setLast12();
+
+  document.getElementById('btn-apply').addEventListener('click', renderAll);
+  document.getElementById('btn-12m').addEventListener('click', () => { setLast12(); renderAll(); });
+
+  document.getElementById('subtitle').textContent =
+    `Generated ${DATA.generated.slice(0, 10)} · ${DATA.repo}`;
+
+  renderAll();
+}
+
+init();
+</script>
+</body>
+</html>

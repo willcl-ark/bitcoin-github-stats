@@ -42,6 +42,7 @@ def empty_month():
         "ci_by_conclusion": Counter(),
         "ci_by_event": Counter(),
         "ci_by_workflow": Counter(),
+        "ci_wf_conclusions": {},
         "pr_merge_times_days": [],
         "pr_close_times_days": [],
         "issue_close_times_days": [],
@@ -57,6 +58,7 @@ def empty_month():
         "pr_by_hour": [0] * 24,
         "commit_by_dow": [0] * 7,
         "commit_by_hour": [0] * 24,
+        "activity_dow_hour": [[0] * 24 for _ in range(7)],
     }
 
 
@@ -83,6 +85,7 @@ def main():
                 m["pr_authors"][pr["user_login"]] += 1
             m["pr_by_dow"][created.weekday()] += 1
             m["pr_by_hour"][created.hour] += 1
+            m["activity_dow_hour"][created.weekday()][created.hour] += 1
 
         if pr["merged_at"]:
             merged = parse_dt(pr["merged_at"])
@@ -146,6 +149,7 @@ def main():
                 m["committers"][c["committer_login"]] += 1
             m["commit_by_dow"][dt.weekday()] += 1
             m["commit_by_hour"][dt.hour] += 1
+            m["activity_dow_hour"][dt.weekday()][dt.hour] += 1
 
     for r in conn.execute("SELECT * FROM workflow_runs").fetchall():
         dt = parse_dt(r["created_at"])
@@ -160,6 +164,9 @@ def main():
             m["ci_by_event"][r["event"]] += 1
             if r["name"]:
                 m["ci_by_workflow"][r["name"]] += 1
+                if r["conclusion"]:
+                    wfc = m["ci_wf_conclusions"]
+                    wfc.setdefault(r["name"], Counter())[r["conclusion"]] += 1
             if r["actor_login"]:
                 m["ci_actors"][r["actor_login"]] += 1
 
@@ -174,10 +181,15 @@ def main():
     serialized = {}
     for mk in sorted(months):
         m = months[mk]
-        serialized[mk] = {
-            k: (dict(v) if isinstance(v, Counter) else v)
-            for k, v in m.items()
-        }
+        out = {}
+        for k, v in m.items():
+            if isinstance(v, Counter):
+                out[k] = dict(v)
+            elif k == "ci_wf_conclusions":
+                out[k] = {wf: dict(cs) for wf, cs in v.items()}
+            else:
+                out[k] = v
+        serialized[mk] = out
 
     output = {
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
